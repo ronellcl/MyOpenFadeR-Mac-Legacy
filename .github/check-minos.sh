@@ -30,9 +30,15 @@ while IFS= read -r -d '' f; do
     *) continue ;;
     esac
     seen=$((seen + 1))
+    # `vtool` reads the LC_BUILD_VERSION command (Xcode 9 and later). Older binaries (the static ffmpeg, built with an older
+    # toolchain) carry LC_VERSION_MIN_MACOSX instead, which only `otool -l` prints.
     min=$(vtool -show-build "$f" 2>/dev/null | awk '/minos/ {print $2; exit}')
     if [ -z "$min" ]; then
-        echo "FAIL $f: no minos" >&2
+        min=$(otool -l "$f" 2>/dev/null |
+            awk '/LC_VERSION_MIN_MACOSX/ {found = 1} found && $1 == "version" {print $2; exit}')
+    fi
+    if [ -z "$min" ]; then
+        echo "FAIL $f: no minimum macOS version in its load commands" >&2
         fail=1
     elif ver_le "$min" "$limit"; then
         echo "ok   $f: minos $min"

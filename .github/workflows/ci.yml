@@ -53,8 +53,12 @@ jobs:
       - name: Build the plugins
         run: extension/plugin/build.sh --quiet
       - run: cargo build --release
+      - name: Static ffmpeg and ffprobe
+        # The same ones the archive ships, and it is worth checking here: they are old binaries (LC_VERSION_MIN_MACOSX, no
+        # `minos` for `vtool`), which is exactly the case the gate has to read with `otool`.
+        run: python3 .github/fetch_tools.py
       - name: Every binary targets no newer than 10.15
-        run: bash .github/check-minos.sh target/release/openfader target/release/*.dylib
+        run: bash .github/check-minos.sh target/release/openfader target/release/*.dylib tools/*
       - name: Tests
         # Two tests read whatever the companion repositories hold *today* and compare it with this tree's parsers: the current
         # themes use tokens added after 0.4.2 (`locales`, `layout-profile`, `studio-*`) and `Pioneer_DJ_XDJ-RX2.xml` repeats a

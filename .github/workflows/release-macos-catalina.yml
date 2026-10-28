@@ -45,6 +45,9 @@ jobs:
             .
             extension/plugin
           key: release-macos-catalina
+          # A failure after the build (this one did, at the `minos` gate) would otherwise throw the whole cache away and pay
+          # the 22 plugins and the LTO build again: two hours on this runner.
+          cache-on-failure: true
       - name: Version
         id: version
         # The tag carries the legacy build number (`v0.4.2-catalina.1`), which the app's update check orders by. A tag that
