@@ -10,16 +10,24 @@ use std::time::Duration;
 const RELEASES: &str =
     "https://api.github.com/repos/ronellcl/MyOpenFadeR-Mac-Legacy/releases?per_page=10";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The legacy build number of this tree: tagged `v<version>-catalina.<n>`, so `n` counts the rebuilds of one upstream version
+/// (the main repository does one release per version). Bump it with the tag; the release workflow refuses a tag that differs.
+const BUILD: u64 = 1;
+
+/// This build, as the releases are tagged: `0.4.2-catalina.1`.
+fn have() -> String {
+    format!("{VERSION}-catalina.{BUILD}")
+}
 
 pub fn wire(app: &App) {
     let s = app.global::<AboutState>();
-    s.set_version(VERSION.into());
+    s.set_version(have().into());
     s.on_open(|url| {
         let _ = library::open_external(&url);
     });
     let weak = app.as_weak();
     std::thread::spawn(move || {
-        if let Some((tag, url)) = latest().filter(|(tag, _)| newer(tag, VERSION)) {
+        if let Some((tag, url)) = latest().filter(|(tag, _)| newer(tag, &have())) {
             let _ = weak.upgrade_in_event_loop(move |app| {
                 let s = app.global::<AboutState>();
                 s.set_update_url(url.into());

@@ -47,9 +47,25 @@ jobs:
           key: release-macos-catalina
       - name: Version
         id: version
+        # The tag carries the legacy build number (`v0.4.2-catalina.1`), which the app's update check orders by. A tag that
+        # disagrees with this tree (Cargo.toml's version and `BUILD` in src/app/about.rs) would ship a build that offers itself
+        # as an update for ever, so it stops here instead.
         run: |
-          if [ "${GITHUB_REF_TYPE}" = tag ]; then v=${GITHUB_REF_NAME#v}; else v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | sed -n 1p)-dev; fi
-          echo "version=$v" >> "$GITHUB_OUTPUT"
+          base=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | sed -n 1p)
+          build=$(sed -n 's/^const BUILD: u64 = \([0-9]*\);/\1/p' src/app/about.rs | sed -n 1p)
+          want="$base-catalina.$build"
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            tag=${GITHUB_REF_NAME#v}
+            if [ "$tag" != "$want" ]; then
+              echo "tag v$tag does not match this tree ($want): bump version in Cargo.toml or BUILD in src/app/about.rs" >&2
+              exit 1
+            fi
+          else
+            tag="$want-dev"
+          fi
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "build=$build" >> "$GITHUB_OUTPUT"
       - name: Build the plugins
         run: extension/plugin/build.sh --quiet
       - name: Build the app
@@ -66,6 +82,8 @@ jobs:
       - name: Package
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          BASE: ${{ steps.version.outputs.base }}
+          BUILD: ${{ steps.version.outputs.build }}
         run: |
           mkdir -p out
           d=MyOpenFadeR.app
@@ -88,8 +106,8 @@ jobs:
             <key>CFBundleExecutable</key><string>openfader</string>
             <key>CFBundleIconFile</key><string>openfader</string>
             <key>CFBundlePackageType</key><string>APPL</string>
-            <key>CFBundleVersion</key><string>$VERSION</string>
-            <key>CFBundleShortVersionString</key><string>$VERSION</string>
+            <key>CFBundleVersion</key><string>$BUILD</string>
+            <key>CFBundleShortVersionString</key><string>$BASE</string>
             <key>LSMinimumSystemVersion</key><string>10.15</string>
             <key>LSApplicationCategoryType</key><string>public.app-category.music</string>
             <key>NSHighResolutionCapable</key><true/>
@@ -97,11 +115,13 @@ jobs:
           </dict>
           </plist>
           EOF
-          # Ad-hoc signature, nested code first: no Developer ID here (see LEGACY.md).
+          # Ad-hoc signature, nested code first: no Developer ID here (see LEGACY.md). No `--options runtime`: the hardened
+          # runtime turns on library validation, which refuses a dylib that is not signed by the same team, and ONNX Runtime is
+          # opened with `dlopen`. Nothing is notarised, so the hardened runtime buys nothing.
           for lib in "$d/Contents/Frameworks/"*.dylib "$d/Contents/MacOS/"*.dylib "$d/Contents/Resources/tools/"*; do
             [ -f "$lib" ] && codesign --force -s - "$lib"
           done
-          codesign --force --options runtime -s - "$d"
+          codesign --force -s - "$d"
           ditto -c -k --keepParent "$d" "out/MyOpenFadeR-$VERSION-macos-catalina-x86_64.zip"
           ls -l out
       - name: Every binary targets no newer than 10.15

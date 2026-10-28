@@ -81,7 +81,10 @@ plugins, `ffmpeg`, the ONNX Runtime dylib) claims a macOS minimum newer than 10.
 the app from starting. Then the archive is unpacked and the app started headless (`.github/smoke.sh`).
 
 Releases are tagged `v<version>-catalina.<n>` (`v0.4.2-catalina.1`, `-catalina.2`…): the app's update check orders those by
-number, so a rebuild of the same version is offered as an update. The workflow creates a **draft** release; publish it by hand.
+number, so a rebuild of the same version is offered as an update. For a release, bump `BUILD` in `src/app/about.rs` (the app
+shows `0.4.2-catalina.<n>` in Help > About and compares against it) and tag; the workflow **refuses a tag that disagrees with
+the tree**, which would otherwise ship a build that offers itself as an update for ever. It creates a **draft** release;
+publish it by hand.
 
 ## Continuous integration
 
