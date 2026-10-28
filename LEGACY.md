@@ -96,7 +96,9 @@ Two tests are skipped there on purpose: `every_checked_out_mapping_reads_back_to
 `the_checked_out_themes_load_without_a_note_and_are_complete` read whatever the companion repositories hold *today* and compare
 it with this tree's parsers. Those repositories have moved past 0.4.2, so the tests fail on the companions, not here: the
 themes use tokens added later (`locales`, `layout-profile`, `studio-*`) and one mapping repeats a `(status, midino)`. The app
-still loads them (an unknown theme token is a warning).
+still loads them (an unknown theme token is a warning). The plugin tests are not run for the same reason: they use
+`DeviceInfo::title`/`about` and a newer `merge` signature, added to the SDK after 0.4.2. The plugins themselves are built (for
+the bundle) and that build is this tree's own SDK, so the plugin ABI matches the app.
 
 ## STEMS: memory and speed
 

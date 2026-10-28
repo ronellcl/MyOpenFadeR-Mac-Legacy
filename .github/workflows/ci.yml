@@ -64,8 +64,10 @@ jobs:
           cargo test --release -- \
             --skip app::midi::mapfile::tests::every_checked_out_mapping_reads_back_to_the_same_file \
             --skip app::skin::file::tests::the_checked_out_themes_load_without_a_note_and_are_complete
-      - name: Plugin tests
-        run: cargo test --release --no-fail-fast --manifest-path extension/plugin/Cargo.toml
+      # No plugin tests here. The plugins are built (above, against this tree's `sdk/`, which is what the bundle ships) but their
+      # own tests are written against the SDK of the current MyOpenFadeR: they use `DeviceInfo::title`/`about` and the newer
+      # `merge` signature, added after 0.4.2. Same drift as the two skipped tests, same conclusion: this tree is a pinned
+      # version, the companions are not.
       - name: ONNX Runtime
         # Loaded at run time (`libloading`), so nothing above needed it; the app finds it in Contents/Frameworks.
         run: |
