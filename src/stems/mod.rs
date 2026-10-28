@@ -3,9 +3,10 @@
 //!
 //! Base: [`Job`], the background job a deck starts per loaded track: its [`Stems`] exist at once and fill segment by segment
 //! (the deck hands them to the player straight away; frames not separated yet play as the original track), from the cache if
-//! the track was separated before, else by the GPU and the CPU side by side, then cached. [`Progress`] is what it reports and
+//! the track was separated before, else by the engines side by side, then cached. [`Progress`] is what it reports and
 //! [`Quality`] (STEMS Analysis Process: sound quality or speed) what it separates at. Children: [`model`] (the open
-//! Demucs v4 `htdemucs` ONNX model, its download, the GPU and CPU [`Engine`](model::Engine)s), [`schedule`] (the order of the
+//! Demucs v4 `htdemucs` ONNX model, its download, the CPU [`Engine`](model::Engine)), [`ort`] (the ONNX Runtime C API it
+//! calls, this Catalina build; see `LEGACY.md`), [`schedule`] (the order of the
 //! segments), [`separate`] (one engine's loop over segments), [`cache`] (on-disk results keyed like the analysis cache, one
 //! entry per quality). The result type, [`crate::audio::Stems`], lives with the audio code that plays it.
 //!

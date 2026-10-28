@@ -17,6 +17,11 @@
   <a href="README.md"><b>English</b></a> · <a href="README.es.md"><b>Español</b></a>
 </p>
 
+> **Compilación legacy para macOS 10.15 Catalina (Intel, x86_64).** Este repositorio es la rama Catalina de
+> [MyOpenFadeR](https://github.com/ronellcl/MyOpenFadeR): la misma aplicación, con ONNX Runtime 1.16.3 para que STEMS funcione
+> en 10.15, objetivo de despliegue 10.15 y solo Intel. Lee [LEGACY.md](LEGACY.md) para el alcance, las diferencias y el aviso
+> sobre la carpeta de datos. Para Apple silicon, Linux y Windows usa el repositorio principal.
+
 MyOpenFadeR es un fork de [OpenFadeR](https://github.com/OpenRsG/OpenFadeR): una aplicación de DJ libre para dos o cuatro mesas, escrita en Rust con [Slint](https://slint.dev). Analiza tus pistas, separa stems, mezcla con efectos y un sampler, y lee controladores MIDI de un conjunto creciente de archivos de mapeo. Los temas, los plugins y los mapeos de controlador se instalan desde repositorios de GitHub con un clic.
 
 <p align="center">
