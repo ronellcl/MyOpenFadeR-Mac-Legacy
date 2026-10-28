@@ -54,7 +54,7 @@ pub use player::{
 };
 pub use rec::{Options as RecOptions, Recorder, new_path as rec_path};
 pub use stems::{
-    BASS, COUNT as STEM_COUNT, DRUMS, Grid, INST, Mixed, NAMES as STEM_NAMES, Source, Stems, VOCAL,
+    BASS, COUNT as STEM_COUNT, DRUMS, Grid, INST, Mixed, NAMES as STEM_NAMES, Part, Source, Stems, VOCAL,
 };
 pub use track16::Track16;
 pub use wavout::write_wav;

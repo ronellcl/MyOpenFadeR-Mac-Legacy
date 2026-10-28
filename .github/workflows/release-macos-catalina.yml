@@ -105,26 +105,9 @@ jobs:
           ditto -c -k --keepParent "$d" "out/MyOpenFadeR-$VERSION-macos-catalina-x86_64.zip"
           ls -l out
       - name: Every binary targets no newer than 10.15
-        # The whole point of this repository: a single library built against 11.0 would keep the app from starting on Catalina.
-        run: |
-          fail=0
-          while IFS= read -r -d '' f; do
-            case "$(file -b "$f")" in
-            *Mach-O*) ;;
-            *) continue ;;
-            esac
-            min=$(vtool -show-build "$f" 2>/dev/null | awk '/minos/ {print $2; exit}')
-            if [ -z "$min" ]; then
-              echo "$f: no minos"; fail=1
-            else
-              echo "$f: minos $min"
-              case "$min" in
-              10.*) awk -v v="$min" 'BEGIN { exit !(v <= 10.15) }' || fail=1 ;;
-              *) fail=1 ;;
-              esac
-            fi
-          done < <(find MyOpenFadeR.app -type f -print0)
-          exit $fail
+        # The whole point of this repository: a single library built against 11.0 (ONNX Runtime 1.17+, an Xcode default) would
+        # keep the app from starting on Catalina.
+        run: bash .github/check-minos.sh MyOpenFadeR.app
       - uses: actions/upload-artifact@v4
         with:
           name: package-macos-catalina

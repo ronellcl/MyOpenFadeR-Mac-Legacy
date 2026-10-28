@@ -2,9 +2,11 @@
 //!
 //! Starts a [`openfader::stems::Job`] like a deck does (play position `PLAY_SECONDS`, default 0), prints the seconds until the
 //! frames at the play position are usable, until the whole track is done and per audio minute, then the energy of each stem
-//! and of the mix with one stem muted, relative to the original (what the mute buttons do to the sound). Set
-//! `OPENFADER_STEMS_MODEL`, point `XDG_CACHE_HOME` at an empty folder to see a cold run (a cache hit separates nothing), and
-//! `OPENFADER_STEMS_GPU=0` to keep the GPU out.
+//! and of the mix with one stem muted, relative to the original (what the mute buttons do to the sound).
+//!
+//! It exits 1 when the four stems do not add up to the original (they are additive by construction), which is what catches a
+//! wrong model output or a broken ONNX Runtime in CI. Set `OPENFADER_STEMS_MODEL`, point `XDG_CACHE_HOME` at an empty folder to
+//! see a cold run (a cache hit separates nothing), and `OPENFADER_STEMS_GPU=0` to keep the GPU out.
 
 use openfader::audio::{self, Mixed, STEM_COUNT, STEM_NAMES, Source};
 use openfader::stems::{Job, Quality};
@@ -110,6 +112,20 @@ fn main() {
             solo - all,
             without - all
         );
+    }
+    // The stems are the mix, decomposed: their sum has to be the original (within a rounding-sized margin), or the model or the
+    // runtime returned something else.
+    let parts = openfader::audio::Part {
+        stems: &stems,
+        gain: [1.0; STEM_COUNT],
+        mask: u8::MAX,
+    };
+    let rebuilt = rms_db(|i| parts.frame_at(i as f64).unwrap(), frames);
+    let off = rebuilt - all;
+    println!("stems sum: {off:+.1} dB (relative to the original)");
+    if off.abs() > 1.0 {
+        eprintln!("the stems do not add up to the original: check the model and the ONNX Runtime");
+        std::process::exit(1);
     }
     openfader::stems::model::shutdown(); // Dawn crashes in `exit()` with the GPU session still open
 }

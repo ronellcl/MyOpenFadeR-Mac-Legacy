@@ -1,8 +1,8 @@
 //! The separation model: Demucs v4 `htdemucs` (Meta, MIT licence), in the ONNX export published by StemSplit
-//! (`StemSplitio/htdemucs-onnx`, MIT) with the STFT/iSTFT inside the graph. Run by ONNX Runtime 1.16.3 (`ort` 1.16) on the
-//! CPU ([`Engine`]); this is the Catalina build, whose ONNX Runtime has no WebGPU provider, see `LEGACY.md`.
+//! (`StemSplitio/htdemucs-onnx`, MIT) with the STFT/iSTFT inside the graph. Run by ONNX Runtime 1.16.3 on the CPU
+//! ([`Engine`]); this is the Catalina build, whose ONNX Runtime has no WebGPU provider, see `LEGACY.md`.
 //!
-//! The dylib is not linked but loaded at run time (`ort`'s `load-dynamic`): [`init_ort`] points ONNX Runtime at the one in the
+//! The dylib is not linked but loaded at run time by [`super::ort`]: [`init_ort`] points ONNX Runtime at the one in the
 //! bundle, or `$ORT_DYLIB_PATH` names it.
 //!
 //! The weights are never in this repository: [`path`] is `$OPENFADER_STEMS_MODEL`, else
