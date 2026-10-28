@@ -1,0 +1,5 @@
+# Every binary targets macOS 10.15: rustc takes the deployment target from here (and passes `-mmacosx-version-min` to the
+# linker), and the build scripts that compile C (SQLite, Lua, flate2) hand it to `cc`. `force` so an exported
+# MACOSX_DEPLOYMENT_TARGET of 11.0 (a newer Xcode's default) cannot raise it: this tree only ships for Catalina.
+[env]
+MACOSX_DEPLOYMENT_TARGET = { value = "10.15", force = true }

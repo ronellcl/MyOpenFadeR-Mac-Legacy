@@ -1,0 +1,5 @@
+# The compiler this tree is built and tested with. Xcode 16 or 26 (Xcode 27 dropped 10.15 as a deployment target).
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

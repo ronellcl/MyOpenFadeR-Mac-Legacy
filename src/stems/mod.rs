@@ -13,6 +13,7 @@
 
 pub mod cache;
 pub mod model;
+pub mod ort;
 pub mod schedule;
 pub mod separate;
 

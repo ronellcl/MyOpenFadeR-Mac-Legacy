@@ -1,0 +1,174 @@
+name: Release (macOS 10.15 Catalina, Intel)
+
+# Tag v*: build the app for macOS 10.15 Catalina on Intel, bundle it with the themes, the controller mappings, the plugins (the
+# native ones prebuilt) and ONNX Runtime 1.16.3, run it from the packaged files, and create a DRAFT release with the archive.
+# A manual run (workflow_dispatch) builds and uploads the archive as a workflow artifact only.
+#
+# This repository ships one platform: macOS 10.15, x86_64. GitHub has no 10.15 runner, so the build runs on an Intel runner
+# with a newer macOS and only *targets* 10.15: Xcode 16 or 26 (Xcode 27 dropped 10.15), deployment target from
+# `.cargo/config.toml`. The `vtool` step below fails the build if any binary or library claims a newer minimum.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # The last ONNX Runtime with a macOS x86_64 build for 10.15 (`minos 10.14`); 1.17+ needs 11.0.
+  ORT_VERSION: "1.16.3"
+  ORT_SHA256: "a395923ed91192e46bf50aec48d728dbf193dbd547ad50a231ba32df51608507"
+
+jobs:
+  package:
+    runs-on: macos-15-intel
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Companions (plugins, themes, mappings)
+        run: |
+          git clone --depth 1 https://github.com/ronellcl/MyOpenFadeR-Plugins.git extension/plugin
+          mkdir -p extension/plugin/.cargo
+          printf '[patch."https://github.com/OpenRsG/OpenFadeR"]\nopenfader-plugin = { path = "../../sdk" }\n' > extension/plugin/.cargo/config.toml
+          git clone --depth 1 https://github.com/OpenRsG/OpenFadeR-Themes.git extension/skin
+          git clone --depth 1 https://github.com/OpenRsG/OpenFadeR-Map.git mappings
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            extension/plugin
+          key: release-macos-catalina
+      - name: Version
+        id: version
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then v=${GITHUB_REF_NAME#v}; else v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | sed -n 1p)-dev; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - name: Build the plugins
+        run: extension/plugin/build.sh --quiet
+      - name: Build the app
+        # No `--target`: the runner is Intel, and `.cargo/config.toml` sets MACOSX_DEPLOYMENT_TARGET=10.15 for the whole build.
+        run: cargo build --profile dist
+      - name: Static ffmpeg and ffprobe
+        run: python .github/fetch_tools.py
+      - name: ONNX Runtime
+        # Loaded at run time (`libloading`), so the build itself needs none of this; the app finds it in Contents/Frameworks.
+        run: |
+          curl -sSL -o ort.tgz "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-osx-x86_64-${ORT_VERSION}.tgz"
+          echo "${ORT_SHA256}  ort.tgz" | shasum -a 256 -c -
+          tar xzf ort.tgz
+      - name: Package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir -p out
+          d=MyOpenFadeR.app
+          mkdir -p "$d/Contents/MacOS" "$d/Contents/Frameworks" "$d/Contents/Resources/onnxruntime"
+          cp target/dist/openfader "$d/Contents/MacOS/"
+          cp -L target/dist/*.dylib "$d/Contents/MacOS/" 2>/dev/null || true
+          cp "onnxruntime-osx-x86_64-${ORT_VERSION}/lib/libonnxruntime.${ORT_VERSION}.dylib" "$d/Contents/Frameworks/"
+          cp "onnxruntime-osx-x86_64-${ORT_VERSION}/LICENSE" "onnxruntime-osx-x86_64-${ORT_VERSION}/ThirdPartyNotices.txt" "$d/Contents/Resources/onnxruntime/"
+          python .github/bundle.py "$d/Contents/Resources"
+          cp LICENSE LEGACY.md README.md "$d/Contents/Resources/"
+          cp assets/openfader.icns "$d/Contents/Resources/"
+          cat > "$d/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>MyOpenFadeR</string>
+            <key>CFBundleDisplayName</key><string>MyOpenFadeR</string>
+            <key>CFBundleIdentifier</key><string>org.openrsg.openfader.legacy</string>
+            <key>CFBundleExecutable</key><string>openfader</string>
+            <key>CFBundleIconFile</key><string>openfader</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleVersion</key><string>$VERSION</string>
+            <key>CFBundleShortVersionString</key><string>$VERSION</string>
+            <key>LSMinimumSystemVersion</key><string>10.15</string>
+            <key>LSApplicationCategoryType</key><string>public.app-category.music</string>
+            <key>NSHighResolutionCapable</key><true/>
+            <key>NSMicrophoneUsageDescription</key><string>MyOpenFadeR records from an audio input when you use REC or the microphone.</string>
+          </dict>
+          </plist>
+          EOF
+          # Ad-hoc signature, nested code first: no Developer ID here (see LEGACY.md).
+          for lib in "$d/Contents/Frameworks/"*.dylib "$d/Contents/MacOS/"*.dylib "$d/Contents/Resources/tools/"*; do
+            [ -f "$lib" ] && codesign --force -s - "$lib"
+          done
+          codesign --force --options runtime -s - "$d"
+          ditto -c -k --keepParent "$d" "out/MyOpenFadeR-$VERSION-macos-catalina-x86_64.zip"
+          ls -l out
+      - name: Every binary targets no newer than 10.15
+        # The whole point of this repository: a single library built against 11.0 would keep the app from starting on Catalina.
+        run: |
+          fail=0
+          while IFS= read -r -d '' f; do
+            case "$(file -b "$f")" in
+            *Mach-O*) ;;
+            *) continue ;;
+            esac
+            min=$(vtool -show-build "$f" 2>/dev/null | awk '/minos/ {print $2; exit}')
+            if [ -z "$min" ]; then
+              echo "$f: no minos"; fail=1
+            else
+              echo "$f: minos $min"
+              case "$min" in
+              10.*) awk -v v="$min" 'BEGIN { exit !(v <= 10.15) }' || fail=1 ;;
+              *) fail=1 ;;
+              esac
+            fi
+          done < <(find MyOpenFadeR.app -type f -print0)
+          exit $fail
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-macos-catalina
+          path: out/*
+      - name: Unpack the archive
+        run: |
+          mkdir unpacked
+          cd unpacked
+          ditto -x -k ../out/*.zip .
+          ls
+      - name: Smoke test of the packaged app
+        run: bash .github/smoke.sh unpacked/MyOpenFadeR.app/Contents/MacOS/openfader smoke
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: package-smoke
+          path: smoke/
+          if-no-files-found: ignore
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-macos-catalina
+          path: out
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: out/*.zip
+          generate_release_notes: true
+          body: |
+            **Legacy build for macOS 10.15 Catalina, Intel (x86_64).** Not for Apple silicon, not for 10.13 or 10.14.
+
+            `MyOpenFadeR-<version>-macos-catalina-x86_64.zip` holds `MyOpenFadeR.app` with its themes, controller mappings,
+            plugins, static `ffmpeg`/`ffprobe` and ONNX Runtime 1.16.3 (STEMS works). It is **not signed or notarized**: move
+            it to Applications, then right-click > Open (once) and confirm. If macOS says it is damaged, run
+            `xattr -dr com.apple.quarantine /Applications/MyOpenFadeR.app`.
+
+            This build shares `~/Library/Application Support/openfader` with the main app: read the schema warning in
+            `LEGACY.md` before going back to a newer version. STEMS needs about 2.7 GB of RAM at the default settings
+            (`OPENFADER_STEMS_OPT=0` halves that, slower).

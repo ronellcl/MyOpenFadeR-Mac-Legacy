@@ -22,6 +22,7 @@ fn rms_db(mut f: impl FnMut(usize) -> [f32; 2], frames: usize) -> f64 {
 }
 
 fn main() {
+    openfader::stems::model::init_ort(); // the ONNX Runtime dylib of the bundle (or $ORT_DYLIB_PATH)
     let args: Vec<String> = std::env::args().collect();
     let path = std::path::PathBuf::from(
         args.get(1)

@@ -1,6 +1,9 @@
 //! The separation model: Demucs v4 `htdemucs` (Meta, MIT licence), in the ONNX export published by StemSplit
-//! (`StemSplitio/htdemucs-onnx`, MIT) with the STFT/iSTFT inside the graph. Run by ONNX Runtime (`ort`) on the CPU and, when
-//! there is a Vulkan GPU, on the GPU too ([`Engine`]).
+//! (`StemSplitio/htdemucs-onnx`, MIT) with the STFT/iSTFT inside the graph. Run by ONNX Runtime 1.16.3 (`ort` 1.16) on the
+//! CPU ([`Engine`]); this is the Catalina build, whose ONNX Runtime has no WebGPU provider, see `LEGACY.md`.
+//!
+//! The dylib is not linked but loaded at run time (`ort`'s `load-dynamic`): [`init_ort`] points ONNX Runtime at the one in the
+//! bundle, or `$ORT_DYLIB_PATH` names it.
 //!
 //! The weights are never in this repository: [`path`] is `$OPENFADER_STEMS_MODEL`, else
 //! `$XDG_CACHE_HOME/openfader/models/htdemucs.onnx`, and [`fetch`] downloads it there (316 MB). By hand:
@@ -10,14 +13,12 @@
 //! 7.8 s), output `stems` `[1, 4, 2, 343980]` in the order [`ORDER`]. Fixed segment length: longer audio is chunked
 //! by [`super::separate`].
 
+use super::ort;
 use crate::analysis::cache;
-use ort::{environment::Environment, ep, logging::LogLevel, session::Session, value::Tensor};
 use parking_lot::Mutex;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
-use std::sync::LazyLock;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 pub const URL: &str = "https://huggingface.co/StemSplitio/htdemucs-onnx/resolve/main/htdemucs.onnx";
 pub const SIZE: u64 = 316_446_953;
@@ -126,102 +127,55 @@ pub fn fetch(progress: &dyn Fn(f32)) -> Result<(), String> {
     std::fs::rename(&part, &dest).map_err(|e| hand(e.to_string()))
 }
 
-/// ONNX Runtime allows one environment per process. Its log goes through [`ort_log`].
-static ENV: LazyLock<Result<Environment, String>> = LazyLock::new(|| {
-    ort::init()
-        .with_name("openfader-stems")
-        .with_logger(std::sync::Arc::new(ort_log))
-        .build()
-        .map_err(|e| e.to_string())
-});
-
-/// Prints ONNX Runtime's first error only. A GPU out of video memory logs one error per buffer it fails to allocate (hundreds
-/// per segment); the first names the cause, and the failed run reaches [`Engine::run`], which logs the fallback to the CPU.
-fn ort_log(level: LogLevel, _category: &str, _id: &str, at: &str, msg: &str) {
-    static SHOWN: AtomicBool = AtomicBool::new(false);
-    if level >= LogLevel::Error && !SHOWN.swap(true, Relaxed) {
-        eprintln!(
-            "stems: ONNX Runtime: {} ({at}); its further errors are not shown",
-            msg.trim()
-        );
+/// Points ONNX Runtime at the dylib of the bundle (`ort`'s `load-dynamic` loads it on first use): `$ORT_DYLIB_PATH` when it is
+/// set, else the newest `libonnxruntime` next to the program or in `../Frameworks` (the macOS bundle). Nothing found is not an
+/// error: `ort` then looks for a system ONNX Runtime the way it does by default.
+///
+/// Call it once at startup, before any thread exists to read the environment.
+pub fn init_ort() {
+    if std::env::var_os("ORT_DYLIB_PATH").is_some_and(|v| !v.is_empty()) {
+        return;
+    }
+    let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(std::path::Path::to_path_buf))
+    else {
+        return;
+    };
+    let names = [
+        "libonnxruntime.1.16.3.dylib",
+        "libonnxruntime.dylib",
+        "libonnxruntime.so.1.16.3",
+        "libonnxruntime.so",
+    ];
+    let found = names
+        .iter()
+        .flat_map(|n| [dir.join(n), dir.join("../Frameworks").join(n)])
+        .find(|p| p.is_file());
+    if let Some(lib) = found {
+        // SAFETY: the first thing main does, before any thread exists to read the environment.
+        unsafe { std::env::set_var("ORT_DYLIB_PATH", lib) };
     }
 }
 
-fn environment() -> Result<&'static Environment, String> {
-    ENV.as_ref().map_err(Clone::clone)
+/// ONNX Runtime's graph optimizations: **none**, which is not a mistake.
+///
+/// 1.16 folds the in-graph STFT into 2.2 GB of constants with its basic level, and it has neither the
+/// `optimization.disable_specified_optimizers` option nor a per-provider arena switch to turn just that pass off (the main
+/// build uses both). Measured on one 8-core machine, one 60 s track, ORT 1.16.3: no optimizations 70 s and 1.2 GB RSS, basic
+/// (folded) 71 s and 4.3 GB, all levels 63 s and 4.3 GB — the fold costs memory and buys nothing here.
+/// `OPENFADER_STEMS_OPT=1|2|all` opts into the folded levels anyway, to compare on a machine with memory to spare.
+fn optimization_level() -> ort_sys::GraphOptimizationLevel {
+    match std::env::var("OPENFADER_STEMS_OPT").as_deref() {
+        Ok("1") | Ok("basic") => ort_sys::GraphOptimizationLevel::ORT_ENABLE_BASIC,
+        Ok("2") | Ok("extended") => ort_sys::GraphOptimizationLevel::ORT_ENABLE_EXTENDED,
+        Ok("3") | Ok("all") => ort_sys::GraphOptimizationLevel::ORT_ENABLE_ALL,
+        _ => ort_sys::GraphOptimizationLevel::ORT_DISABLE_ALL,
+    }
 }
 
 /// An open model: one ONNX Runtime session.
-pub struct Model(Session);
-
-/// Free memory the one-off fold needs (it peaks at about 6.5 GB of RSS).
-const FOLD_MIN_KIB: u64 = 8 << 20;
-
-/// `MemAvailable` in KiB from the text of `/proc/meminfo`.
-fn mem_available_kib(meminfo: &str) -> Option<u64> {
-    let l = meminfo
-        .lines()
-        .find_map(|l| l.strip_prefix("MemAvailable:"))?;
-    l.split_whitespace().next()?.parse().ok()
-}
-
-/// Refuses the fold when the machine lacks the memory for its peak (Linux; elsewhere, or if unreadable, no guard).
-fn fold_memory_ok() -> Result<(), String> {
-    let free = std::fs::read_to_string("/proc/meminfo")
-        .ok()
-        .and_then(|t| mem_available_kib(&t));
-    match free {
-        Some(k) if k < FOLD_MIN_KIB => Err(format!(
-            "not enough free memory to fold the model ({} MiB available, {} MiB needed)",
-            k >> 10,
-            FOLD_MIN_KIB >> 10
-        )),
-        _ => Ok(()),
-    }
-}
-
-/// The model with its constant subgraphs folded (ONNX Runtime's basic optimisations, run once on the CPU and saved as
-/// `<model>.folded.onnx` in the cache, 345 MB), rebuilt when the model is newer. Folding inside every session open costs
-/// 6.5 GB of RSS at the peak and keeps 1.7 GB; the saved result opens in 0.6 GB. Building it peaks at about 6 GB once.
-fn folded() -> Result<PathBuf, String> {
-    static FOLDING: Mutex<()> = Mutex::new(());
-    let src = path()?;
-    let dst = cache::root()
-        .ok_or("no cache directory")?
-        .join("models")
-        .join(
-            src.with_extension("folded.onnx")
-                .file_name()
-                .ok_or("model path has no file name")?,
-        );
-    let _one = FOLDING.lock();
-    let modified = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
-    if modified(&dst).is_some_and(|d| modified(&src).is_none_or(|s| d >= s)) {
-        return Ok(dst);
-    }
-    fold_memory_ok()?;
-    std::fs::create_dir_all(dst.parent().ok_or("no models folder")?).map_err(|e| e.to_string())?;
-    let part = dst.with_extension("part");
-    let session = Session::builder(environment()?)
-        .map_err(|e| e.to_string())?
-        .with_log_level(LogLevel::Error)
-        .map_err(|e| e.to_string())?
-        .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level1)
-        .map_err(|e| e.to_string())?
-        .with_execution_providers([ep::CPU::default().with_arena_allocator(false).build()])
-        .map_err(|e| e.to_string())?
-        .with_optimized_model_path(&part)
-        .map_err(|e| e.to_string())?
-        .commit_from_file(&src);
-    let session = crate::paths::at(session, &src);
-    if session.is_err() {
-        let _ = std::fs::remove_file(&part); // a failed fold may leave a truncated file
-    }
-    drop(session?);
-    trim_heap(); // the folding's transient gigabytes go back to the system
-    std::fs::rename(&part, &dst).map_err(|e| e.to_string())?;
-    Ok(dst)
-}
+pub struct Model(ort::Session);
 
 /// Hands freed heap pages back to the system (glibc keeps them otherwise).
 pub(crate) fn trim_heap() {
@@ -236,79 +190,39 @@ pub(crate) fn trim_heap() {
 }
 
 impl Model {
-    /// Memory (measured 2026-10-15, `htdemucs`, after three segments): ORT's defaults take 5.5 GB RSS on the CPU (constant
-    /// folding expands the in-graph STFT into 2.2 GB of constants, the CPU arena keeps every peak) and 1.7 GB on the GPU
-    /// (6.5 GB at open). Now: no constant folding at open and no CPU arena; the GPU reads the model folded once
-    /// ([`folded`]): 0.6 GB, 0.50 s per segment (unfolded it slows to 0.8 s while the CPU engine runs). The CPU reads the
-    /// original: 0.8 GB, 1.2 to 1.3 s per segment (folded it peaks at 2.7 GB for the same speed).
-    fn open(threads: usize, gpu: bool) -> Result<Model, String> {
-        let p = match gpu.then(folded) {
-            Some(Ok(p)) => p,
-            Some(Err(e)) => {
-                eprintln!("stems: folded model unavailable ({e}); the GPU reads the original");
-                path()?
-            }
-            None => path()?,
-        };
-        let cpu = ep::CPU::default().with_arena_allocator(false).build();
-        let providers = if gpu {
-            #[cfg(feature = "stems-gpu")]
-            let providers = vec![ep::WebGPU::default().build().error_on_failure(), cpu];
-            #[cfg(not(feature = "stems-gpu"))]
-            let providers = vec![cpu];
-            providers
-        } else {
-            vec![cpu]
-        };
-        let mut b = Session::builder(environment()?)
-            .map_err(|e| e.to_string())?
-            .with_log_level(LogLevel::Error)
-            .map_err(|e| e.to_string())?
-            .with_intra_threads(threads)
-            .map_err(|e| e.to_string())?
-            .with_inter_threads(1)
-            .map_err(|e| e.to_string())?
-            // Idle intra-op threads spin by default; two engines share the machine, so let them sleep.
-            .with_intra_op_spinning(false)
-            .map_err(|e| e.to_string())?
-            .with_config_entry(
-                "optimization.disable_specified_optimizers",
-                "ConstantFolding",
-            )
-            .map_err(|e| e.to_string())?
-            .with_execution_providers(providers)
-            .map_err(|e| e.to_string())?;
-        let model = crate::paths::at(b.commit_from_file(&p).map(Model), &p);
+    /// Memory: the main build turns constant folding off (a 1.17+ session option) and keeps the CPU arena out, which is 1.4 GB
+    /// on a 60 s track here. This build gets the same session (no arena, no optimizations) through [`optimization_level`]:
+    /// 1.2 GB, and the same stems in the same time.
+    fn open(threads: usize) -> Result<Model, String> {
+        let p = path()?;
+        let model = ort::runtime()?
+            .session(&p, threads, optimization_level())
+            .map(Model);
+        let model = crate::paths::at(model, &p);
         trim_heap(); // what the graph transformations allocated and freed
         model
     }
 
     /// One segment: `mix` is `[L; SEGMENT]` then `[R; SEGMENT]`; returns `[model stem][channel][SEGMENT]` flattened.
     fn run(&mut self, mix: Vec<f32>) -> Result<Vec<f32>, String> {
-        let input = Tensor::from_array(([1usize, 2, SEGMENT], mix)).map_err(|e| e.to_string())?;
-        let out = self
-            .0
-            .run(ort::inputs!["mix" => input])
-            .map_err(|e| e.to_string())?;
-        let (shape, data) = out["stems"]
-            .try_extract_tensor::<f32>()
-            .map_err(|e| e.to_string())?;
-        if shape.iter().copied().ne([1, 4, 2, SEGMENT as i64]) {
+        let (shape, data) = self.0.run(&mix)?;
+        if shape != [1, 4, 2, SEGMENT as i64] {
             return Err(format!("unexpected model output shape {shape:?}"));
         }
-        Ok(data.to_vec())
+        Ok(data)
     }
 }
 
-/// Where a segment runs. The GPU is ONNX Runtime's WebGPU provider (Dawn over Vulkan: any GPU with a Vulkan driver, no CUDA or
-/// cuDNN); the CPU is the default provider. Both sessions live for the whole process and are shared by every deck's separation:
-/// opening one costs about 2 s, and a GPU's first run compiles its shaders (about 1 s more).
+/// Where a segment runs. The CPU is ONNX Runtime's default provider and the only one this build has: ONNX Runtime 1.16.3 (the
+/// newest release that runs on 10.15, `LEGACY.md`) has no WebGPU provider, so [`Engine::Gpu`] stays in the enum for the engine
+/// picking code and is always out. The session lives for the whole process and is shared by every deck's separation: opening
+/// it costs about 2 s.
 ///
 /// Measured 2026-10-13 on a Ryzen/RTX 3090 box under load (`examples/stems_bench.rs`, one 7.8 s segment): CPU 1.15 to 1.45 s
-/// whatever the thread count (8, 12 or 16; the graph does not scale), WebGPU 0.53 to 0.66 s. The two run side by side, so a
-/// separation uses both and takes each next segment as soon as an engine is free.
+/// whatever the thread count (8, 12 or 16; the graph does not scale).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Engine {
+    /// Out of this build: no WebGPU provider.
     Gpu,
     /// ONNX Runtime intra-op threads.
     Cpu(usize),
@@ -351,46 +265,20 @@ impl<T> Slot<T> {
 static GPU: Mutex<Slot<Model>> = Mutex::new(Slot::Untried);
 static CPU: Mutex<Option<(usize, Model)>> = Mutex::new(None);
 
-/// A GPU segment slower than this is a software rasteriser (llvmpipe), which only steals a core from the CPU engine. The
-/// first run compiles shaders (about 1 s on a fast GPU).
-const GPU_TOO_SLOW: Duration = Duration::from_secs(10);
-
-/// Why a GPU that just ran a segment is to be given up, if it is: the run failed, or took far too long.
-fn gpu_verdict<T>(out: &Result<T, String>, took: Duration) -> Option<String> {
-    match out {
-        Err(e) => Some(e.clone()),
-        Ok(_) if took > GPU_TOO_SLOW => Some(format!(
-            "{:.1} s per segment: a software renderer",
-            took.as_secs_f32()
-        )),
-        Ok(_) => None,
-    }
-}
-
-/// `OPENFADER_STEMS_GPU=0` keeps the GPU out (comparisons, machines where Vulkan misbehaves); a build without the `stems-gpu`
-/// feature has none.
-fn gpu_allowed() -> Result<(), &'static str> {
-    if !cfg!(feature = "stems-gpu") {
-        Err("not in this build")
-    } else if std::env::var("OPENFADER_STEMS_GPU").is_ok_and(|v| v == "0") {
-        Err("disabled by OPENFADER_STEMS_GPU=0")
-    } else {
-        Ok(())
-    }
-}
-
+/// The GPU is out of this build: ONNX Runtime 1.16.3 has no WebGPU provider. The reason is remembered once, like a machine
+/// without Vulkan, so the engine picking code needs no special case.
 fn gpu_session() -> Result<(), String> {
     GPU.lock()
         .ensure(
-            gpu_allowed(),
-            || Model::open(1, true),
+            Err("not in this build: ONNX Runtime 1.16.3 has no WebGPU provider"),
+            || unreachable!("no GPU session in this build"),
             |why| eprintln!("stems: GPU unavailable ({why}); separating on the CPU"),
         )
         .map(|_| ())
 }
 
-/// Closes both sessions before the process exits: Dawn's teardown inside `exit()` can crash with a session still open.
-/// Waits for a segment in flight; engines opened afterwards are out.
+/// Closes the session before the process exits. Waits for a segment in flight; engines opened afterwards are out.
+/// (The main build does the same for Dawn, whose teardown inside `exit()` crashes with a session still open.)
 pub fn shutdown() {
     *GPU.lock() = Slot::Unusable("shut down".into());
     *CPU.lock() = None;
@@ -428,7 +316,7 @@ impl Engine {
                 let mut c = CPU.lock();
                 if c.as_ref().is_none_or(|(t, _)| *t != threads) {
                     *c = None; // the old session goes first: two copies of the weights are 600 MB
-                    *c = Some((threads, Model::open(threads, false)?));
+                    *c = Some((threads, Model::open(threads)?));
                 }
                 Ok(())
             }
@@ -439,19 +327,7 @@ impl Engine {
     pub fn run(self, mix: Vec<f32>) -> Result<Vec<f32>, String> {
         self.open()?;
         match self {
-            Engine::Gpu => {
-                let mut g = GPU.lock();
-                let Slot::Ready(m) = &mut *g else {
-                    return Err("GPU unavailable".into());
-                };
-                let t = Instant::now();
-                let out = m.run(mix);
-                if let Some(why) = gpu_verdict(&out, t.elapsed()) {
-                    eprintln!("stems: GPU unusable ({why}); separating on the CPU");
-                    *g = Slot::Unusable(why);
-                }
-                out
-            }
+            Engine::Gpu => Err("GPU unavailable".into()), // `open` never gets this far: no provider in this build
             Engine::Cpu(threads) => {
                 let mut c = CPU.lock();
                 match &mut *c {
@@ -468,13 +344,14 @@ pub fn warm(engines: &[Engine]) {
     for &e in engines {
         std::thread::spawn(move || {
             if e.open().is_ok() {
-                let _ = e.run(vec![0.0; 2 * SEGMENT]); // shaders, thread pool, allocator
+                let _ = e.run(vec![0.0; 2 * SEGMENT]); // thread pool, allocator
             }
         });
     }
 }
 
-/// The engines a separation uses: the GPU, and the CPU with [`super::threads`] threads.
+/// The engines a separation uses: the GPU (out of this build, so only the reason is remembered) and the CPU with
+/// [`super::threads`] threads.
 pub fn engines(multithread: bool) -> [Engine; 2] {
     [Engine::Gpu, Engine::Cpu(super::threads(multithread))]
 }
@@ -483,12 +360,6 @@ pub fn engines(multithread: bool) -> [Engine; 2] {
 mod tests {
     use super::*;
 
-    #[test]
-    fn meminfo_parse() {
-        let t = "MemTotal:       32000000 kB\nMemAvailable:    7340032 kB\nBuffers: 1 kB\n";
-        assert_eq!(mem_available_kib(t), Some(7_340_032));
-        assert_eq!(mem_available_kib("MemTotal: 1 kB\n"), None);
-    }
     use std::cell::Cell;
 
     #[test]
@@ -542,22 +413,5 @@ mod tests {
             .map(|n| *n);
         assert_eq!(why, Err("disabled by OPENFADER_STEMS_GPU=0".into()));
         assert!(logged.get(), "the reason is logged, not silent");
-    }
-
-    #[test]
-    fn a_failed_or_software_rendered_run_gives_the_gpu_up_a_fast_one_does_not() {
-        assert_eq!(gpu_verdict(&Ok(()), Duration::from_millis(600)), None);
-        assert_eq!(
-            gpu_verdict(&Ok(()), Duration::from_secs(1)),
-            None,
-            "shader compile on the first run"
-        );
-        assert!(gpu_verdict(&Ok(()), Duration::from_secs(30))
-            .unwrap()
-            .contains("software"));
-        assert_eq!(
-            gpu_verdict::<()>(&Err("device lost".into()), Duration::ZERO).as_deref(),
-            Some("device lost")
-        );
     }
 }

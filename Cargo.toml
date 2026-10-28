@@ -5,11 +5,10 @@ edition = "2024"
 rust-version = "1.85"
 
 [features]
-default = ["app", "stems-gpu"]
+default = ["app"]
 app = ["dep:slint", "dep:openfader-ui", "dep:midir", "dep:wayland-client", "dep:wayland-backend"]
-# STEMS on the GPU (ONNX Runtime's WebGPU provider, Dawn). ONNX Runtime ships no WebGPU build for ARM Linux: the Raspberry
-# Pi build (`--no-default-features --features app`, docs/raspberry-pi.md) separates on the CPU only.
-stems-gpu = ["ort/webgpu"]
+# No `stems-gpu` here: ONNX Runtime 1.16.3 (the newest release that runs on 10.15, see LEGACY.md) has no WebGPU provider, so
+# this build separates on the CPU only. The engine picking code still knows about the GPU and finds it out of the build.
 
 [[bin]]
 name = "openfader"
@@ -25,7 +24,10 @@ parking_lot = "0.12"
 # winit access: files dropped on the window (X11 / Windows / macOS) and the Wayland display for our own drag-and-drop (src/app/drop/).
 slint = { version = "1.17", optional = true, features = ["unstable-winit-030", "raw-window-handle-06"] }
 midir = { version = "0.11.1", optional = true }
-ort = { version = "2.0.0-rc.14", default-features = false, features = ["std", "download-binaries", "tls-native", "copy-dylibs", "api-31"] }
+# ONNX Runtime 1.16.3 is the newest release whose macOS x86_64 dylib runs on 10.15 Catalina (`minos 10.14`): 1.17+ needs 11.0
+# and 1.20+ needs 13.3. Its Rust wrapper (`ort` 1.16) is yanked from crates.io, so `src/stems/ort.rs` calls the C API itself;
+# `ort-sys` only supplies the types, with linking disabled (the dylib is opened at run time, so building needs none).
+ort-sys = { version = "2.0.0-rc.14", features = ["disable-linking"] }
 ureq = "3"
 sha2 = "0.10" # the SHA256SUMS the repositories publish are verified against (src/catalog/check.rs)
 serde = { version = "1", features = ["derive"] }

@@ -48,6 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // waveforms freeze although audio keeps playing). Set before any Slint call and before threads are spawned.
     unsafe { std::env::set_var("SLINT_NO_MUDA", "1") };
     bundled_tools_first_in_path();
+    openfader::stems::model::init_ort(); // the ONNX Runtime dylib of the bundle, before any thread uses it
     openfader::audio::device::quiet_alsa();
     // A path given (or the old Database setting) is a library to connect; the own music folder always is one.
     let legacy = std::env::args_os()

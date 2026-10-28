@@ -6,7 +6,9 @@ use super::{library, AboutState, App};
 use slint::ComponentHandle;
 use std::time::Duration;
 
-const RELEASES: &str = "https://api.github.com/repos/ronellcl/MyOpenFadeR/releases?per_page=10";
+// The legacy repository, never the main one: its releases are arm64 and would be offered as an update this build cannot run.
+const RELEASES: &str =
+    "https://api.github.com/repos/ronellcl/MyOpenFadeR-Mac-Legacy/releases?per_page=10";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn wire(app: &App) {
@@ -63,18 +65,26 @@ fn is_version(tag: &str) -> bool {
         .any(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
 }
 
-/// `tag` (`v1.2.3`, a `-suffix` ignored) is a higher version than `have`.
+/// `tag` is a higher version than `have`.
+///
+/// The numbers decide first (`0.10.0` over `0.9.9`). With the same numbers, the legacy build number does: this tree publishes
+/// `v0.4.2-catalina.1`, `-catalina.2` and so on, because a `-suffix` used to be ignored and every release of a version would
+/// have looked the same. A plain `v0.4.2` counts as build 0.
 fn newer(tag: &str, have: &str) -> bool {
-    let nums = |s: &str| -> Vec<u64> {
+    let parts = |s: &str| -> (Vec<u64>, u64) {
         let s = s.trim_start_matches('v');
-        s.split('-')
-            .next()
-            .unwrap_or(s)
-            .split('.')
-            .map(|n| n.parse().unwrap_or(0))
-            .collect()
+        let (core, build) = match s.split_once("-catalina.") {
+            Some((core, n)) => (core, n.parse().unwrap_or(0)),
+            None => (s.split('-').next().unwrap_or(s), 0),
+        };
+        let nums = core.split('.').map(|n| n.parse().unwrap_or(0)).collect();
+        (nums, build)
     };
-    nums(tag) > nums(have)
+    let (mut a, build_a) = parts(tag);
+    let (mut b, build_b) = parts(have);
+    a.resize(a.len().max(b.len()), 0);
+    b.resize(a.len(), 0);
+    (a, build_a) > (b, build_b)
 }
 
 #[test]
@@ -84,6 +94,15 @@ fn versions() {
     assert!(newer("1.0.0-beta", "0.9.0"));
     assert!(!newer("v0.1.0", "0.1.0"));
     assert!(!newer("v0.1.0", "0.2.0"));
+}
+
+#[test]
+fn legacy_build_numbers() {
+    assert!(newer("v0.4.2-catalina.2", "0.4.2-catalina.1"), "same numbers");
+    assert!(newer("v0.4.2-catalina.1", "0.4.2"), "a plain release is build 0");
+    assert!(!newer("v0.4.2-catalina.1", "0.4.2-catalina.1"));
+    assert!(!newer("v0.4.2-catalina.1", "0.4.3-catalina.0"));
+    assert!(newer("v0.5.0-catalina.0", "0.4.9-catalina.7"), "the numbers first");
 }
 
 #[test]
