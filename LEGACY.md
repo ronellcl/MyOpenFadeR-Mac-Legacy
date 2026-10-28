@@ -16,7 +16,7 @@ a fork of it, so this repository was created by pushing the full history of `ron
 |---|---|---|
 | ONNX Runtime | 1.31 through `ort` 2.0 | **1.16.3**, through a small C-API layer (`src/stems/model.rs`, `src/stems/ort.rs`) |
 | STEMS engine | CPU and WebGPU | **CPU only** (1.16.3 has no WebGPU provider); `Engine::Gpu` stays in the enum as "out of this build" |
-| Constant folding | off, via a 1.17+ session option | **on**, because 1.16.3 has no such option (`OPENFADER_STEMS_OPT=0` avoids it) |
+| Graph optimizations | extended, folding off via a 1.17+ session option | **none**: 1.16.3 folds 2.2 GB of constants for no gain (see STEMS below) |
 | Deployment target | 11.0 | **10.15** (`.cargo/config.toml`, `Info.plist`) |
 | Architectures | Linux, Windows, macOS arm64 | **macOS x86_64 only** |
 | Update check | `ronellcl/MyOpenFadeR` | `ronellcl/MyOpenFadeR-Mac-Legacy`, with `-catalina.N` build numbers |
@@ -76,6 +76,25 @@ No Developer ID and no notarisation: after moving the app to `/Applications`, **
 xattr -dr com.apple.quarantine /Applications/MyOpenFadeR.app
 ```
 
+Before the archive is released, `.github/check-minos.sh` walks the bundle and fails the build if any Mach-O file (the app, the
+plugins, `ffmpeg`, the ONNX Runtime dylib) claims a macOS minimum newer than 10.15 — a single library built against 11.0 keeps
+the app from starting. Then the archive is unpacked and the app started headless (`.github/smoke.sh`).
+
+Releases are tagged `v<version>-catalina.<n>` (`v0.4.2-catalina.1`, `-catalina.2`…): the app's update check orders those by
+number, so a rebuild of the same version is offered as an update. The workflow creates a **draft** release; publish it by hand.
+
+## Continuous integration
+
+One job, on the Intel macOS runner (`.github/workflows/ci.yml`): build, the `minos` check, the test suite, the plugin tests,
+STEMS — ONNX Runtime 1.16.3 is downloaded and `examples/stems_bench.rs` separates a generated 12 s tone, failing if the four
+stems do not add up to the original — and the smoke test.
+
+Two tests are skipped there on purpose: `every_checked_out_mapping_reads_back_to_the_same_file` and
+`the_checked_out_themes_load_without_a_note_and_are_complete` read whatever the companion repositories hold *today* and compare
+it with this tree's parsers. Those repositories have moved past 0.4.2, so the tests fail on the companions, not here: the
+themes use tokens added later (`locales`, `layout-profile`, `studio-*`) and one mapping repeats a `(status, midino)`. The app
+still loads them (an unknown theme token is a warning).
+
 ## STEMS: memory and speed
 
 ONNX Runtime 1.16.3 folds the in-graph STFT into 2.2 GB of constants with its basic optimisations, and 1.16 has neither the
@@ -120,5 +139,6 @@ The patch list, in the order they matter:
 4. `src/main.rs`, `examples/stems_bench.rs` — `init_ort()` before anything uses ONNX Runtime.
 5. `src/stems/mod.rs` — `pub mod ort;`.
 6. `src/app/about.rs` — legacy update repository, `-catalina.N` ordering.
-7. `.cargo/config.toml`, `rust-toolchain.toml`, `Info.plist` (in the workflow), `.github/workflows/`.
-8. `README.md` — the notice at the top.
+7. `.cargo/config.toml`, `rust-toolchain.toml`, `Info.plist` (in the workflow), `.github/workflows/`,
+   `.github/check-minos.sh`, `examples/seg_bench.rs`.
+8. `README.md`, `README.es.md` — the notice at the top; `src/stems/mod.rs` — the module list.

@@ -118,11 +118,6 @@ impl Runtime {
                     ),
                 )?;
                 let model = os_path(path)?;
-                let mut raw = ptr::null_mut();
-                status(
-                    api,
-                    (api.CreateSession)(self.env, model.as_ptr(), opts, &mut raw),
-                )?;
                 let mut mem = ptr::null_mut();
                 status(
                     api,
@@ -132,6 +127,14 @@ impl Runtime {
                         &mut mem,
                     ),
                 )?;
+                let mut raw = ptr::null_mut();
+                if let Err(e) = status(
+                    api,
+                    (api.CreateSession)(self.env, model.as_ptr(), opts, &mut raw),
+                ) {
+                    (api.ReleaseMemoryInfo)(mem);
+                    return Err(e);
+                }
                 Ok(Session { api, raw, mem })
             })();
             (api.ReleaseSessionOptions)(opts);
