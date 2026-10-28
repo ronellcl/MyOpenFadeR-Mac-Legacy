@@ -61,7 +61,7 @@ jobs:
         # (status, midino). Both are about the companions drifting from this pinned version, not about this tree: the app still
         # loads those themes (unknown tokens are ignored), and the smoke test below loads them. The other 512 tests run.
         run: |
-          cargo test --release \
+          cargo test --release -- \
             --skip app::midi::mapfile::tests::every_checked_out_mapping_reads_back_to_the_same_file \
             --skip app::skin::file::tests::the_checked_out_themes_load_without_a_note_and_are_complete
       - name: Plugin tests
