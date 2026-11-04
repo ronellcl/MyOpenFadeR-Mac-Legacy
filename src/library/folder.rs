@@ -9,11 +9,20 @@
 //! [`read_track`] fields `title, artist, album, key, genre, comment` (each `len u32` + UTF-8), `bpm_x100 i64`,
 //! `length_s i64`, `bitrate u32`, `sample_rate u32`. A wrong magic/version or a short or over-long file is ignored (all files
 //! are read again). Bump [`CACHE_VERSION`] when [`read_track`] fills another field or reads tags differently.
+//! [`Folder::open_partial`] is the same open without the tags: the cache's tags are lifted, a miss shows the stem,
+//! and no file is opened — the rows are there almost at once, while [`Folder::open`] fills the tags behind it.
+//! [`Folder::open_level`] lists one level like a file manager: the files directly in the root plus its immediate
+//! subfolders, with no recursive walk, so a big disk opens at once instead of after a full scan.
+//! A deck decode learns a file's tags for free: [`remember_tags`] keeps them in one small `learned.bin` cache,
+//! keyed by the file's path, that any open merges over its listing cache: a played file keeps its tags at
+//! whichever level or root the browser reaches it from.
 
 use super::{Library, Playlist, PlaylistRow, Track, playlist_tree, walk_files};
 use crate::analysis::cache;
+use parking_lot::Mutex;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::{MetadataOptions, MetadataRevision, StandardTagKey};
@@ -23,6 +32,8 @@ use symphonia::core::units::TimeBase;
 const AUDIO_EXTS: [&str; 7] = ["mp3", "m4a", "aac", "flac", "wav", "aif", "aiff"];
 const CACHE_MAGIC: &[u8; 4] = b"RKFC";
 const CACHE_VERSION: u32 = 1;
+/// Learned-tag entries kept ([`remember_tags`]): enough to warm a session's picks across folders.
+const HOT_MAX: usize = 4096;
 
 pub struct Folder {
     /// (folder relative to root with `/` separators, "" = root; track), sorted by path.
@@ -113,12 +124,39 @@ fn apply(t: &mut Track, rev: &MetadataRevision) {
     }
 }
 
+/// The file name without its extension: a track's title when nothing else names it.
+fn stem(p: &Path) -> String {
+    p.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// A track that is only listed: its stem as the title, everything else default ([`Folder::open_partial`]).
+fn stem_track(p: &Path) -> Track {
+    Track {
+        file: Some(p.to_path_buf()),
+        title: stem(p),
+        ..Track::default()
+    }
+}
+
+/// Average bitrate in kbps from the file size and a playing time: what an MP3 or AAC file actually uses, where the
+/// container's sample format has no bit depth to report. 0 when either side is unknown.
+pub fn average_bitrate(path: &Path, length_s: i64) -> u32 {
+    if length_s <= 0 {
+        return 0;
+    }
+    let bytes = std::fs::metadata(path).map_or(0, |m| m.len());
+    if bytes == 0 {
+        return 0;
+    }
+    let kbps = bytes.saturating_mul(8) / (length_s as u64).saturating_mul(1000);
+    kbps.min(u64::from(u32::MAX)) as u32
+}
+
 /// The track a file is: tags and stream facts through symphonia, the title falling back to the file stem.
 pub fn read_track(path: &Path) -> Track {
-    let stem = path
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let stem = stem(path);
     let mut t = Track {
         file: Some(path.to_path_buf()),
         ..Track::default()
@@ -165,6 +203,10 @@ pub fn read_track(path: &Path) -> Track {
         }
         Some(())
     })();
+    let avg = average_bitrate(path, t.length_s);
+    if avg > 0 {
+        t.bitrate = avg;
+    }
     if t.title.is_empty() {
         t.title = stem;
     }
@@ -188,6 +230,49 @@ fn stamp(p: &Path) -> Option<Stamp> {
 fn cache_file(root: &Path) -> Option<PathBuf> {
     let h = cache::fnv1a(root.to_string_lossy().bytes());
     Some(cache::root()?.join("folder").join(format!("{h:016x}.bin")))
+}
+
+/// `<cache folder>/folder/learned.bin`: the tags a deck learned ([`remember_tags`]), keyed by the file's absolute
+/// path. One file for every folder: the same track shows the same tags at whichever level or root it is reached.
+fn learned_file() -> Option<PathBuf> {
+    Some(cache::root()?.join("folder").join("learned.bin"))
+}
+
+/// Keeps the tags a deck learned for `track` (its decode already opened the file: bitrate, length, sample rate,
+/// BPM and key come for free) in the learned-tag cache, merged over a folder's listing cache by the next open.
+/// Small and separate so this never rewrites a folder's big tag cache; a failed write is dropped.
+pub fn remember_tags(track: &Track) {
+    if let Some(file) = learned_file() {
+        remember_at(&file, track);
+    }
+}
+
+/// [`remember_tags`] writing to `hot` (the test chooses the path).
+fn remember_at(hot: &Path, track: &Track) {
+    let Some(file) = track.file.as_deref() else {
+        return;
+    };
+    let Some(stamp) = stamp(file) else {
+        return;
+    };
+    // One writer at a time: two deck workers would read-modify-write the same cache.
+    static WRITE: Mutex<()> = Mutex::new(());
+    let _write = WRITE.lock();
+    let mut entries = std::fs::read(hot)
+        .map(|b| decode(&b))
+        .unwrap_or_default();
+    entries.insert(file.to_string_lossy().into_owned(), (stamp, track.clone()));
+    if entries.len() > HOT_MAX {
+        let mut keys: Vec<_> = entries.keys().cloned().collect();
+        keys.sort();
+        for key in &keys[..keys.len() - HOT_MAX] {
+            entries.remove(key);
+        }
+    }
+    let rows: Vec<_> = entries.iter().map(|(_, (s, t))| (t, *s)).collect();
+    let tmp = hot.with_extension(format!("{}.tmp", std::process::id()));
+    let _ = hot.parent().map_or(Ok(()), std::fs::create_dir_all);
+    let _ = std::fs::write(&tmp, encode(&rows)).and_then(|()| std::fs::rename(&tmp, hot));
 }
 
 fn put_str(o: &mut Vec<u8>, s: &str) {
@@ -269,32 +354,119 @@ fn decode(b: &[u8]) -> HashMap<String, (Stamp, Track)> {
     go(b).unwrap_or_default()
 }
 
+/// Whether an open reads tags off the disk: [`Folder::open`]'s full open, or [`Folder::open_partial`]'s
+/// listing-only one, which lifts what the tag cache holds and lists a miss without opening the file.
+#[derive(Clone, Copy)]
+enum Tag {
+    Full,
+    Cached,
+}
+
 impl Folder {
     pub fn open(root: &Path) -> Result<Self, String> {
-        Self::open_with(root, cache_file(root).as_deref(), read_track)
+        Self::open_with(
+            root,
+            cache_file(root).as_deref(),
+            learned_file().as_deref(),
+            read_track,
+            Tag::Full,
+            usize::MAX,
+            false,
+        )
     }
 
-    /// [`Folder::open`] with the tag cache file and the tag reader given (the test counts reads).
+    /// [`Folder::open`] without opening a file: whatever the tag cache holds is listed, a miss shows the file
+    /// stem with no other tags, and the cache is left alone. Almost instant on any disk (the walk and the
+    /// `stat`s only): the listing the browser starts from while [`Folder::open`] fills the tags behind it.
+    pub fn open_partial(root: &Path) -> Result<Self, String> {
+        Self::open_partial_with(root, cache_file(root).as_deref())
+    }
+
+    /// One level of the tree, like a file manager: the audio directly in `root` plus its immediate subfolders,
+    /// with no recursive walk. Tags are lifted from the cache as in [`Folder::open_partial`] (a miss is the file
+    /// stem), so it is the first paint of a folder; its subfolders are opened the same way when picked.
+    pub fn open_level(root: &Path) -> Result<Self, String> {
+        Self::open_with(
+            root,
+            cache_file(root).as_deref(),
+            learned_file().as_deref(),
+            read_track,
+            Tag::Cached,
+            0,
+            true,
+        )
+    }
+
+    /// [`Folder::open_partial`] with the tag cache file given (the test counts reads).
+    fn open_partial_with(root: &Path, cache: Option<&Path>) -> Result<Self, String> {
+        Self::open_with(
+            root,
+            cache,
+            learned_file().as_deref(),
+            read_track,
+            Tag::Cached,
+            usize::MAX,
+            false,
+        )
+    }
+
+    /// [`Folder::open`] with the tag cache, the learned-tag cache and the tag reader given (the tests choose
+    /// them); `mode` picks the full open or the listing-only one ([`Tag`]), `depth` how far [`walk_files`]
+    /// descends and `subdirs` whether the immediate subfolders are listed even when they hold no audio directly.
     fn open_with(
         root: &Path,
         cache: Option<&Path>,
+        learned: Option<&Path>,
         read: impl Fn(&Path) -> Track,
+        mode: Tag,
+        depth: usize,
+        subdirs: bool,
     ) -> Result<Self, String> {
         if !root.is_dir() {
             return Err(format!("{} is not a folder", root.display()));
         }
+        // Phase 0 instrumentation: where a slow stick spends its time. Everything here runs on a worker thread.
         let mut files = Vec::new();
-        walk(root, &mut files);
+        let t = Instant::now();
+        walk_files(root, depth, |p| {
+            if is_audio(&p) {
+                files.push(p);
+            }
+        });
         files.sort();
+        let walk_ms = t.elapsed().as_millis();
+        let t = Instant::now();
         let mut old = cache
             .and_then(|c| std::fs::read(c).ok())
             .map(|b| decode(&b))
             .unwrap_or_default();
+        // What a deck learned is newer than the listing cache ([`remember_tags`]); only the entries under this
+        // root matter, keyed as the cache is (the file's full path).
+        if let Some(hot) = learned.and_then(|h| std::fs::read(h).ok()) {
+            for (path, entry) in decode(&hot) {
+                if Path::new(&path).starts_with(root) {
+                    old.insert(path, entry);
+                }
+            }
+        }
+        let cache_ms = t.elapsed().as_millis();
         let old_len = old.len();
         let mut dirs = BTreeSet::new();
+        // A level open shows its subfolders even when they hold no audio directly: they are the way down.
+        if subdirs {
+            let entries = std::fs::read_dir(root).map_err(|e| format!("{}: {e}", root.display()))?;
+            for entry in entries.flatten() {
+                if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                    dirs.insert(entry.file_name().to_string_lossy().into_owned());
+                }
+            }
+        }
         let mut tracks = Vec::with_capacity(files.len());
         let mut stamps = Vec::with_capacity(files.len());
         let mut dirty = false;
+        let mut tags = 0;
+        let t = Instant::now();
+        let n_files = files.len();
         for f in files {
             let rel = f
                 .strip_prefix(root)
@@ -316,14 +488,25 @@ impl Folder {
                 let (old_st, t) = old.remove(&*f.to_string_lossy())?;
                 (old_st == st).then_some(t)
             });
-            let t = hit.unwrap_or_else(|| {
-                dirty = true;
-                read(&f)
-            });
+            let t = match (mode, hit) {
+                (Tag::Full, None) => {
+                    dirty = true;
+                    tags += 1;
+                    read(&f)
+                }
+                // A listing-only miss names the file and carries no tags: nothing is read ([`Folder::open_partial`]).
+                (Tag::Cached, None) => stem_track(&f),
+                (_, Some(t)) => t,
+            };
             stamps.push(st);
             tracks.push((rel, t));
         }
-        if let Some(c) = cache.filter(|_| dirty || old_len != tracks.len()) {
+        let checked_ms = t.elapsed().as_millis();
+        let mut saved_ms = 0;
+        // A listing-only open never writes: its misses carry no tags ([`Folder::open_partial`]).
+        if matches!(mode, Tag::Full)
+            && let Some(c) = cache.filter(|_| dirty || old_len != tracks.len())
+        {
             let entries: Vec<_> = tracks
                 .iter()
                 .zip(&stamps)
@@ -332,8 +515,22 @@ impl Folder {
             let tmp = c.with_extension(format!("{}.tmp", std::process::id()));
             let _ = c.parent().map_or(Ok(()), std::fs::create_dir_all);
             // ponytail: a failed cache write is dropped; the tracks are still returned.
+            let t = Instant::now();
             let _ = std::fs::write(&tmp, encode(&entries)).and_then(|()| std::fs::rename(&tmp, c));
+            saved_ms = t.elapsed().as_millis();
         }
+        // Fase 0 instrumentation: where a slow stick spends its time; the listing-only read marks itself.
+        let only = match (mode, depth) {
+            (Tag::Cached, 0) => ", level",
+            (Tag::Full, _) => "",
+            (Tag::Cached, _) => ", listing-only",
+        };
+        eprintln!(
+            "sources: Explorer {}: {} files, walk {walk_ms} ms, cache {cache_ms} ms, \
+            checked {checked_ms} ms, tags {tags}, saved {saved_ms} ms{only}",
+            root.display(),
+            n_files
+        );
         Ok(Self { tracks, dirs })
     }
 }
@@ -371,8 +568,9 @@ impl Library for Folder {
 
     /// A folder lists its own audio and that of everything below it.
     fn tracks(&self, playlist: Option<&str>) -> Result<Vec<Track>, String> {
+        let t = Instant::now();
         let below = playlist.map(|p| (p, format!("{p}/")));
-        Ok(self
+        let out = self
             .tracks
             .iter()
             .filter(|(d, _)| {
@@ -381,7 +579,18 @@ impl Library for Folder {
                     .is_none_or(|(p, b)| d == p || d.starts_with(b.as_str()))
             })
             .map(|(_, t)| t.clone())
-            .collect())
+            .collect::<Vec<_>>();
+        // Instrumentation: a UI-thread listing of a big folder shows up here.
+        if t.elapsed().as_millis() >= 20 {
+            eprintln!(
+                "sources: Explorer {}: listed {}/{} tracks in {} ms",
+                playlist.unwrap_or("(all)"),
+                out.len(),
+                self.tracks.len(),
+                t.elapsed().as_millis()
+            );
+        }
+        Ok(out)
     }
 }
 
@@ -408,6 +617,18 @@ mod tests {
     }
 
     #[test]
+    fn average_bitrate_reads_the_file_size_over_its_playing_time() {
+        let dir = std::env::temp_dir().join(format!("rk-bitrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.mp3");
+        std::fs::write(&file, vec![0u8; 1_000_000]).unwrap();
+        assert_eq!(average_bitrate(&file, 40), 200);
+        assert_eq!(average_bitrate(&file, 0), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn second_open_reads_no_tags_from_unchanged_files() {
         let dir = std::env::temp_dir().join(format!("rk-foldercache-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -420,10 +641,18 @@ mod tests {
         let reads = Cell::new(0);
         let open = || {
             reads.set(0);
-            let f = Folder::open_with(&root, Some(&cache), |p| {
-                reads.set(reads.get() + 1);
-                fake(p)
-            })
+            let f = Folder::open_with(
+                &root,
+                Some(&cache),
+                None,
+                |p| {
+                    reads.set(reads.get() + 1);
+                    fake(p)
+                },
+                Tag::Full,
+                usize::MAX,
+                false,
+            )
             .unwrap();
             f.tracks(None).unwrap()
         };
@@ -446,6 +675,141 @@ mod tests {
         std::fs::write(&cache, b"RKFC garbage").unwrap();
         assert_eq!(open().len(), 1);
         assert_eq!(reads.get(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_listing_only_open_lists_the_cache_and_stems_without_reading() {
+        let dir = std::env::temp_dir().join(format!("rk-folderpartial-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("lib");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("a.wav"), b"aaaa").unwrap();
+        std::fs::write(root.join("sub/b.mp3"), b"bb").unwrap();
+        let cache = dir.join("cache/folder.bin");
+
+        // The full open reads both files and writes the cache.
+        let reads = Cell::new(0);
+        let full = Folder::open_with(
+            &root,
+            Some(&cache),
+            None,
+            |p| {
+                reads.set(reads.get() + 1);
+                fake(p)
+            },
+            Tag::Full,
+            usize::MAX,
+            false,
+        )
+        .unwrap();
+        let full_rows = full.tracks(None).unwrap();
+        assert_eq!(reads.get(), 2);
+
+        // A listing-only open reads nothing and lifts the cache's tags: the rows are the same.
+        reads.set(0);
+        let listed = Folder::open_partial_with(&root, Some(&cache)).unwrap();
+        assert_eq!(reads.get(), 0, "the listing-only open reads no tags");
+        assert_eq!(listed.tracks(None).unwrap(), full_rows);
+
+        // A new file is listed with its stem and no tags, the read comes later; the folders are there, so the
+        // tree's subfolder rows list from the listing-only open too.
+        std::fs::write(root.join("new.m4a"), b"n").unwrap();
+        let partial = Folder::open_partial_with(&root, Some(&cache)).unwrap();
+        assert_eq!(reads.get(), 0);
+        assert_eq!(partial.tracks(Some("sub")).unwrap().len(), 1);
+        let listed = partial.tracks(None).unwrap();
+        assert_eq!(listed.len(), 3);
+        assert_eq!(listed[0], full_rows[0]);
+        assert_eq!(listed[2], full_rows[1]);
+        let new = &listed[1];
+        assert_eq!(new.title, "new");
+        assert_eq!(new.file.as_deref(), Some(root.join("new.m4a").as_path()));
+        assert!(new.artist.is_empty() && new.bpm_x100 == 0);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_level_open_lists_only_the_root_and_its_immediate_folders() {
+        let dir = std::env::temp_dir().join(format!("rk-folderlevel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("lib");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::create_dir_all(root.join("videos")).unwrap();
+        std::fs::write(root.join("a.wav"), b"aaaa").unwrap();
+        std::fs::write(root.join("sub/b.mp3"), b"bb").unwrap();
+        let cache = dir.join("cache/folder.bin");
+
+        let reads = Cell::new(0);
+        let full = Folder::open_with(
+            &root,
+            Some(&cache),
+            None,
+            |p| {
+                reads.set(reads.get() + 1);
+                fake(p)
+            },
+            Tag::Full,
+            usize::MAX,
+            false,
+        )
+        .unwrap();
+        assert_eq!(full.tracks(None).unwrap().len(), 2);
+        assert_eq!(reads.get(), 2);
+
+        // A level open walks no deeper, reads nothing and still offers the way down: every immediate folder.
+        reads.set(0);
+        let level = Folder::open_with(
+            &root,
+            Some(&cache),
+            None,
+            |p| {
+                reads.set(reads.get() + 1);
+                fake(p)
+            },
+            Tag::Cached,
+            0,
+            true,
+        )
+        .unwrap();
+        assert_eq!(reads.get(), 0);
+        let rows = level.tracks(None).unwrap();
+        assert_eq!(rows.len(), 1, "only the root's own file");
+        assert_eq!(rows[0], fake(&root.join("a.wav")));
+        assert!(level.tracks(Some("sub")).unwrap().is_empty());
+        assert!(level.dirs.contains("sub") && level.dirs.contains("videos"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_deck_learned_tag_wins_over_the_listing_cache() {
+        let dir = std::env::temp_dir().join(format!("rk-folderhot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("lib");
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("a.mp3");
+        std::fs::write(&file, b"aaaa").unwrap();
+        let cache = dir.join("cache/folder.bin");
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+
+        // No listing cache yet: the tags a deck learned come from the learned-tag cache, without opening the file.
+        let mut learned = fake(&file);
+        learned.bitrate = 320;
+        let hot = dir.join("learned.bin");
+        remember_at(&hot, &learned);
+        let t = &Folder::open_with(
+            &root,
+            Some(&cache),
+            Some(&hot),
+            read_track,
+            Tag::Cached,
+            usize::MAX,
+            false,
+        )
+        .unwrap()
+        .tracks(None)
+        .unwrap()[0];
+        assert_eq!((t.title.as_str(), t.bitrate), ("T a", 320));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -32,7 +32,18 @@ MyOpenFadeR is a fork of [OpenFadeR](https://github.com/OpenRsG/OpenFadeR): an o
 
 Every screenshot on this page comes from the running app, with a library of synthetic tracks generated for these pictures. There is no copyrighted music in them.
 
-## What's new in 0.4.2
+## What's new in 0.5.0
+
+0.5.0 brings the browser up to mixing speed:
+
+- **Multi-select the track list.** Ctrl/Cmd-click toggles a row, Shift-click picks a range, and the picked rows are highlighted with a selection count. *Remove from list* deletes every picked entry in one undoable step and never touches files on disk.
+- **Folders act from their right-click menu.** Favorite a folder, remove it from favorites, analyze the whole folder in the background, or refresh it; nested folders can be favorited too. Clicking a favorite opens it instead of unpinning it.
+- **Folder analysis remembers its work.** Tracks already analyzed with the current analyzer are skipped, and the walk runs on a worker thread.
+- **Analyzer versions without a bulk rescan.** The analysis cache records the analyzer version. A one-time notice at startup offers *Reanalyze now* or *Later*; stale tracks are re-analyzed on demand when a deck loads them, never all at once.
+- **No grid changes under a playing deck.** A newly arrived analysis is applied only when the deck is stopped or paused with no loop or scratch; otherwise it waits.
+- **Batch add.** *Add to playlist* and the palettes now apply to every selected track, without duplicates.
+
+### 0.4.2
 
 0.4.2 makes timing and SYNC trustworthy under fast hands and adds the last safety and workflow details:
 
@@ -278,7 +289,6 @@ Audio, MIDI and folder behaviour can be set with `OPENFADER_OUTPUT_DEVICE`, `OPE
 - [docs/skins.md](docs/skins.md): theme files, every token, layout hints
 - [docs/mappings.md](docs/mappings.md): controller mapping files
 - [docs/library-format.md](docs/library-format.md): the open JSON / CSV export and the library database tables
-- [hallazgos_solucionados.md](hallazgos_solucionados.md): what was found and what was repaired, with the commit of each fix (in Spanish)
 
 The code follows [docs/code-structure.md](docs/code-structure.md): one folder per section (`library/`, `analysis/`, `audio/`, `plugin/`, `app/`, …), a base `mod.rs` and one child per variant. Only `app/` and the `ui/` crate use Slint.
 

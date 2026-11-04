@@ -9,8 +9,10 @@
 
 use crate::app::prefs;
 use openfader::device::{self, Device};
+use openfader::library::Library;
 use slint::ComponentHandle;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 /// A pinned folder: the volume's label and the path of the folder below it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,6 +82,7 @@ pub fn is_pinned(p: &Pinned) -> bool {
 }
 
 /// Pins the folder (and saves the settings).
+#[allow(dead_code)]
 pub fn pin(p: &Pinned) {
     let text = p.as_text();
     prefs::update(|s| {
@@ -90,6 +93,7 @@ pub fn pin(p: &Pinned) {
 }
 
 /// Takes the pin off (and saves the settings).
+#[allow(dead_code)]
 pub fn unpin(p: &Pinned) {
     let text = p.as_text();
     prefs::update(|s| s.pinned_folders.retain(|t| *t != text));
@@ -111,8 +115,11 @@ pub fn reindex_volume(label: String) {
 /// Reads the folder of the pin `p` (the volume is mounted at `mount`) and keeps what it holds in the index: the
 /// search finds the tracks of a pinned folder without walking the stick again. Returns how many rows it holds.
 pub fn index(p: &Pinned, mount: &Path) -> usize {
+    let t_walk = Instant::now();
     let mut files = Vec::new();
     openfader::library::folder::walk(&mount.join(&p.path), &mut files);
+    let walk_ms = t_walk.elapsed().as_millis();
+    let t_tags = Instant::now();
     let mut rows = Vec::with_capacity(files.len());
     for f in &files {
         let t = openfader::library::folder::read_track(f);
@@ -144,7 +151,16 @@ pub fn index(p: &Pinned, mount: &Path) -> usize {
     }
     let store = openfader::store::global();
     let n = rows.len();
-    if let Ok(written) = store.index_put(&p.label, &rows) {
+    let tags_ms = t_tags.elapsed().as_millis();
+    let t_put = Instant::now();
+    let written = store.index_put(&p.label, &rows).ok();
+    let put_ms = t_put.elapsed().as_millis();
+    eprintln!(
+        "sources: pin {}: {} files, walk {walk_ms} ms, tags {tags_ms} ms, index {put_ms} ms",
+        p.as_text(),
+        files.len()
+    );
+    if let Some(written) = written {
         return written;
     }
     n
@@ -177,7 +193,98 @@ impl super::View {
                     path: rel,
                 })
             }
+            super::sidebar::Entry::DeviceFolderList(d, j, k) => {
+                let source = self.sources.get(*d)?;
+                let device = match &source.kind {
+                    super::sources::Kind::Device(d) => d,
+                    _ => return None,
+                };
+                let folder = source.folders.get(*j)?;
+                let path = folder.path.join(&folder.playlists.get(*k)?.id);
+                Pinned::of(device, &path)
+            }
             _ => None,
+        }
+    }
+
+    /// The absolute path of a folder row (a device folder or one of its levels).
+    fn folder_path(&self, entry: &super::sidebar::Entry) -> Option<std::path::PathBuf> {
+        match entry {
+            super::sidebar::Entry::DeviceFolder(d, j) => {
+                Some(self.sources.get(*d)?.folders.get(*j)?.path.clone())
+            }
+            super::sidebar::Entry::DeviceFolderList(d, j, k) => {
+                let folder = self.sources.get(*d)?.folders.get(*j)?;
+                Some(folder.path.join(&folder.playlists.get(*k)?.id))
+            }
+            _ => None,
+        }
+    }
+
+    /// A folder command from the tree's right-click menu.
+    pub(super) fn folder_action(&mut self, app: &super::App, row: usize, what: &str) {
+        let Some(entry) = self.entries.get(row).cloned() else {
+            return;
+        };
+        if !matches!(
+            entry,
+            super::sidebar::Entry::DeviceFolder(..)
+                | super::sidebar::Entry::DeviceFolderList(..)
+                | super::sidebar::Entry::Pinned(_)
+        ) {
+            return;
+        }
+        match what {
+            "favorite" => self.set_favorite(app, entry, true),
+            "unfavorite" => self.set_favorite(app, entry, false),
+            "analyze" => {
+                let Some(path) = self.folder_path(&entry) else {
+                    return;
+                };
+                let weak = app.as_weak();
+                app.global::<super::BrowserState>().set_status(
+                    format!("{}: listing the folder to analyse…", path.display()).into(),
+                );
+                std::thread::spawn(move || {
+                    let tracks = openfader::library::folder::Folder::open_partial(&path)
+                        .and_then(|f| f.tracks(None))
+                        .map(|tracks| {
+                            tracks
+                                .into_iter()
+                                .filter(|t| {
+                                    t.file.is_some()
+                                        && openfader::analysis::cache::analyzer_version(t)
+                                            < openfader::analysis::cache::ANALYZER_VERSION
+                                })
+                                .collect::<Vec<_>>()
+                        });
+                    let _ = slint::invoke_from_event_loop(move || {
+                        let Some(app) = weak.upgrade() else { return };
+                        match tracks {
+                            Ok(tracks) if tracks.is_empty() => app
+                                .global::<super::BrowserState>()
+                                .set_status("every track in this folder is already analysed".into()),
+                            Ok(tracks) => {
+                                let n = tracks.len();
+                                crate::app::analyze::request(&tracks);
+                                app.global::<super::BrowserState>().set_status(
+                                    format!("analysing {n} track(s) from the folder").into(),
+                                );
+                            }
+                            Err(e) => app.global::<super::BrowserState>().set_status(
+                                format!("cannot read the folder: {e}").into(),
+                            ),
+                        }
+                    });
+                });
+            }
+            "refresh" => {
+                self.levels.clear();
+                self.deep.clear();
+                self.refresh_sources(app);
+                self.load(app);
+            }
+            _ => {}
         }
     }
 
@@ -186,16 +293,76 @@ impl super::View {
         let Some(p) = self.chosen_pin() else {
             return;
         };
-        if is_pinned(&p) {
-            unpin(&p);
-            self.say(app, format!("{} is not pinned any more", p.label));
-        } else {
-            pin(&p);
+        let pinned = !is_pinned(&p);
+        self.apply_pin(app, p, pinned);
+    }
+
+    /// The tree menu's "Favorite folder" / "Remove from favorites": pins or unpins the
+    /// folder of `entry` (the right-clicked row, which is not necessarily the chosen one).
+    pub(super) fn set_favorite(
+        &mut self,
+        app: &super::App,
+        entry: super::sidebar::Entry,
+        pinned: bool,
+    ) {
+        self.entry = entry;
+        let Some(p) = self.chosen_pin() else {
+            return;
+        };
+        if is_pinned(&p) == pinned {
+            self.say(
+                app,
+                if pinned {
+                    format!("{} is already a favorite", p.label)
+                } else {
+                    format!("{} is not a favorite", p.label)
+                },
+            );
+            return;
+        }
+        self.apply_pin(app, p, pinned);
+    }
+
+    /// Pins or unpins `p`, then saves the settings and rebuilds the tree on the event loop
+    /// (never while the View borrow is held: `prefs::update` runs its listeners).
+    fn apply_pin(&mut self, app: &super::App, p: Pinned, pinned: bool) {
+        let text = p.as_text().to_owned();
+        let app_weak = app.as_weak();
+
+        if pinned {
             self.say(app, format!("{} is pinned", p.label));
             self.index_pin(app, &p);
+        } else {
+            self.say(app, format!("{} is not pinned any more", p.label));
         }
         // The tree lists the pins: build it again.
         self.refresh_sources(app);
+        // Persist the prefs change on the Slint event loop, after this handler returns and
+        // the View borrow is released. Calling prefs::update() synchronously here triggers
+        // prefs::on_change listeners that borrow View again while folder_action still holds
+        // the RefCell borrow, causing a RefCell already borrowed panic.
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(app) = app_weak.upgrade() else { return };
+            prefs::update(|s| {
+                if pinned {
+                    if !s.pinned_folders.contains(&text) {
+                        s.pinned_folders.push(text);
+                    }
+                } else {
+                    s.pinned_folders.retain(|t| *t != text);
+                }
+            });
+            // Notify listeners now that View is no longer borrowed, so the UI reflects
+            // the new prefs (e.g. favorites section in the tree).
+            prefs::notify();
+            // Rebuild the sources tree so the newly pinned folder shows up immediately,
+            // not only after a restart. collect() reads prefs::get().pinned_folders, which
+            // now contains the added pin (or no longer contains the removed one).
+            if let Some(view) = super::view() {
+                let mut v = view.borrow_mut();
+                v.refresh_sources(&app);
+            }
+        });
     }
 
     /// Indexes the pinned folder in the background: the search finds its tracks without walking the stick again.

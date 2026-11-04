@@ -57,7 +57,7 @@ use openfader::{
 };
 use playlists::{Ask, Panel};
 use sidebar::Entry;
-use slint::{ComponentHandle, ModelRc, StandardListViewItem, Timer, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, StandardListViewItem, Timer, VecModel};
 use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc, time::Duration};
 use table::{Look, Reference};
 
@@ -133,6 +133,12 @@ pub fn loading(app: &App, text: &str, progress: Option<f32>) {
 pub fn track_edited(app: &App, t: &Track) {
     let Some(v) = view() else { return };
     v.borrow_mut().track_edited(app, t);
+}
+
+/// A deck decode learned tags for `t` (B′): the browser shows them at once and the folder's tag cache keeps them.
+pub fn tags_learned(t: &Track) {
+    let Some(v) = view() else { return };
+    v.borrow_mut().tags_learned(t);
 }
 
 /// Where the list comes from when Related is off.
@@ -213,6 +219,10 @@ struct View {
     history: Vec<Track>,
     /// The track chosen in the table last.
     selected: Option<Track>,
+    /// Rows picked with Ctrl/Shift, as indices into `list` (survive sorting and filtering).
+    picked: Vec<usize>,
+    /// The row a Shift range grows from, as an index into `list`.
+    anchor: Option<usize>,
     reference: Reference,
     /// The settings the cells were last built with; refreshed by every [`View::refresh`].
     look: Look,
@@ -244,12 +254,24 @@ struct View {
     _video_preview: Timer,
     /// The mounted devices and the iTunes / xml / Explorer sources (see [`sources`]).
     sources: Vec<sources::Source>,
+    /// The sub-folder levels listed on demand, by source, folder and path relative to the folder
+    /// ([`folder::Folder::open_level`]; [`list::View::open_level`]).
+    levels: HashMap<(usize, usize, String), Rc<dyn Library>>,
+    /// The levels a worker is listing right now, so a second click does not start another walk.
+    levels_reading: std::collections::HashSet<(usize, usize, String)>,
+    /// The recursive listings of a folder requested with SUBFOLDERS, by source, folder and relative
+    /// path ("" is the folder itself; [`list::View::open_deep`]).
+    deep: HashMap<(usize, usize, String), Rc<dyn Library>>,
+    /// The recursive listings a worker is reading right now.
+    deep_reading: std::collections::HashSet<(usize, usize, String)>,
     /// The sources whose branch the user folded (only their own row is in the tree).
     folded: std::collections::HashSet<usize>,
     /// The lists of the library whose branch the user folded.
     folded_lib: std::collections::HashSet<usize>,
     /// The tree's root sections the user folded (History, Tags, Devices, Downloaded, Local Music, Online Music).
     folded_sections: std::collections::HashSet<Entry>,
+    /// The device folders the user folded: (source, folder, relative path; "" for its top-level row).
+    folded_folders: std::collections::HashSet<(usize, usize, String)>,
     /// Tracks the table dims, by store key; see [`played`].
     played: std::collections::HashSet<String>,
     /// Day → custom display name for a stored history session (renamed by the user; keeps the date as the key).
@@ -342,6 +364,73 @@ impl View {
     fn cursor(&self, app: &App) -> Option<usize> {
         let row = usize::try_from(app.global::<BrowserState>().get_current_row()).ok()?;
         self.shown.get(row).copied()
+    }
+
+    /// Picks `row` (a visible row) with the modifiers of a click: Shift grows from the anchor, Ctrl/Meta toggles
+    /// one, a plain click replaces the selection. The clicked track is always the one shown in the inspector.
+    pub(in crate::app::browser) fn pick(&mut self, app: &App, row: usize, ctrl: bool, shift: bool) {
+        let Some(&at) = self.shown.get(row) else {
+            return;
+        };
+        let before = self.picked.clone();
+        if shift {
+            if let Some(a) = self.anchor.and_then(|a| self.shown.iter().position(|&i| i == a)) {
+                let (lo, hi) = (a.min(row), a.max(row));
+                self.picked = self.shown[lo..=hi].to_vec();
+            } else {
+                self.picked = vec![at];
+            }
+        } else if ctrl {
+            if let Some(n) = self.picked.iter().position(|&i| i == at) {
+                self.picked.remove(n);
+            } else {
+                self.picked.push(at);
+            }
+        } else {
+            self.picked = vec![at];
+        }
+        self.anchor = Some(at);
+        self.selected = self.list.get(at).cloned();
+        let state = app.global::<BrowserState>();
+        state.set_picked_count(self.picked.len() as i32);
+        state.set_selection_mode(self.picked.len() > 1);
+        self.repaint_picked(&before);
+    }
+
+    /// Repaints only the visible rows whose picked state changed (`before` = the previous `picked`).
+    fn repaint_picked(&self, before: &[usize]) {
+        for (visible, &i) in self.shown.iter().enumerate() {
+            let (was, now) = (before.contains(&i), self.picked.contains(&i));
+            if was != now {
+                if let Some(row) = self.rows.row_data(visible) {
+                    row.set_row_data(table::PICKED, if now { "1" } else { "" }.into());
+                }
+            }
+        }
+    }
+
+    /// Forgets the multi-selection (after a delete or when the list changes).
+    pub(in crate::app::browser) fn clear_picks(&mut self, app: &App) {
+        let before = self.picked.clone();
+        self.picked.clear();
+        self.anchor = None;
+        let state = app.global::<BrowserState>();
+        state.set_picked_count(0);
+        state.set_selection_mode(false);
+        self.repaint_picked(&before);
+    }
+
+    /// The picked tracks, in table order (one entry when nothing was picked but a row is chosen).
+    pub(in crate::app::browser) fn picked_tracks(&self) -> Vec<Track> {
+        let mut at = self.picked.clone();
+        at.sort_unstable();
+        at.dedup();
+        if at.is_empty() {
+            return self.selected.iter().cloned().collect();
+        }
+        at.into_iter()
+            .filter_map(|i| self.list.get(i).cloned())
+            .collect()
     }
 }
 

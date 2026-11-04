@@ -10,10 +10,14 @@ use super::{
     at_end, autocue, bpm_text, cuelist, fmt_ms, gain, grid_bpm, render, tempo_text, Deck, Decoded,
     Loaded, Pending,
 };
-use crate::app::prefs::{self, analysis::GridSource};
+use crate::app::{
+    browser,
+    prefs::{self, analysis::GridSource},
+    trackinfo,
+};
 use openfader::{
     analysis, audio,
-    library::{Library, Track},
+    library::{Library, Track, folder},
     plugin::{event, source},
     store,
 };
@@ -245,7 +249,11 @@ impl Deck {
             player.set_key_shift(0.0);
             player.seek(cue_ms);
             // Analyse only what is missing; analyze() fills both parts, poll_decode keeps whichever the library had.
-            let need = a.beats.is_empty() || a.three_band_detail.is_empty();
+            // A cache written by an older analyzer stays usable, but the deck asks for a fresh one as soon as it plays.
+            let stale = t.file.as_deref().is_some_and(|_| {
+                analysis::cache::analyzer_version(t) < analysis::cache::ANALYZER_VERSION
+            });
+            let need = a.beats.is_empty() || a.three_band_detail.is_empty() || stale;
             if need && t.file.is_some() && pcm.is_none() {
                 status += " · analyzing…";
             }
@@ -298,6 +306,11 @@ impl Deck {
             v.pads = ModelRc::new(VecModel::from(pad_views));
             v.title = t.title.clone().into();
             v.artist = t.artist.clone().into();
+            v.file = t
+                .file
+                .as_deref()
+                .map_or_else(String::new, |p| p.to_string_lossy().into_owned())
+                .into();
             (v.elapsed_text, v.remain_text) =
                 (fmt_ms(0).into(), format!("-{}", fmt_ms(duration)).into());
             v.status = if loading {
@@ -379,22 +392,47 @@ impl Deck {
             .map_or_else(Default::default, |p| (p.title, p.notes));
         let mut added_cues = false;
         let mut stem_src = None;
+        let mut src_rate = 0;
+        let mut decoded_ms = 0;
+        let mut decoded_rate = 0;
         match res {
             Ok((track, analysed)) => {
+                // The decode itself knows the real duration and rate, whether or not a player takes the audio below.
+                decoded_rate = track.rate;
+                decoded_ms = if track.rate > 0 {
+                    (track.frames() as u64 * 1000 / u64::from(track.rate)) as u32
+                } else {
+                    0
+                };
                 // Fill only what the library lacked; keep its beats / waveform otherwise.
                 if let Some(an) = analysed {
                     notes.retain(|n| n != "not analysed");
-                    l.analysis.key = an.key.clone();
-                    if l.analysis.beats.is_empty() && !an.beats.is_empty() {
-                        l.lib_beats = an.beats.clone();
-                        l.analysis.beats = an.beats;
-                        notes.push("grid: analysed".into());
-                    }
-                    if l.analysis.three_band_detail.is_empty() && !an.three_band_detail.is_empty() {
-                        l.analysis.three_band_detail = an.three_band_detail;
-                        l.analysis.three_band_preview = an.three_band_preview;
-                        l.detail = render::detail::wave_frames(&l.analysis, Some((&track, track.rate)));
-                        notes.push("waveform: analysed".into());
+                    // Never change beats/grid/waveform live: if the deck plays, scratches,
+                    // seeks or loops, keep the new analysis pending until it is safe.
+                    let safe = !self.playing()
+                        && l.loop_.is_none()
+                        && !self.sync.scratching.get();
+                    if safe {
+                        l.analysis.key = an.key.clone();
+                        if l.analysis.beats.is_empty() && !an.beats.is_empty() {
+                            l.lib_beats = an.beats.clone();
+                            l.analysis.beats = an.beats;
+                            notes.push("grid: analysed".into());
+                        }
+                        if l.analysis.three_band_detail.is_empty()
+                            && !an.three_band_detail.is_empty()
+                        {
+                            l.analysis.three_band_detail = an.three_band_detail;
+                            l.analysis.three_band_preview = an.three_band_preview;
+                            l.detail = render::detail::wave_frames(
+                                &l.analysis,
+                                Some((&track, track.rate)),
+                            );
+                            notes.push("waveform: analysed".into());
+                        }
+                    } else {
+                        l.pending_analysis = Some(an);
+                        notes.push("grid: diferido (deck reproduciendo)".into());
                     }
                 }
                 // The analysis may have just given this track a grid and waveform: phrases and automatic cues follow.
@@ -427,9 +465,13 @@ impl Deck {
                     .filter(|_| prefs::with(|p| p.stems));
                 if let Some(player) = &self.player {
                     let mut player = player.borrow_mut();
+                    src_rate = decoded_rate;
                     player.load16(track);
                     player.seek(l.cue_ms);
                     l.duration_ms = player.duration_ms();
+                }
+                if l.duration_ms == 0 {
+                    l.duration_ms = decoded_ms;
                 }
                 l.overview = render::overview::wave(&l.analysis, l.duration_ms);
             }
@@ -444,6 +486,40 @@ impl Deck {
         if l.key.is_empty() {
             l.key = l.analysis.key.clone().unwrap_or_default(); // library key wins, else the detected one
         }
+        // B′: the decode already opened the file, so its tags cost nothing extra: keep them for the browser row and
+        // the folder's tag cache instead of rereading the file there.
+        let learned = l.track.as_ref().and_then(|t| {
+            let file = t.file.as_deref()?;
+            if t.length_s > 0
+                && t.bitrate > 0
+                && t.sample_rate > 0
+                && t.bpm_x100 > 0
+                && !t.key.is_empty()
+            {
+                return None;
+            }
+            let mut learned = t.clone();
+            let ms = l.duration_ms.max(decoded_ms);
+            if learned.length_s == 0 && ms > 0 {
+                learned.length_s = ((u64::from(ms) + 500) / 1000) as i64;
+            }
+            if learned.bitrate == 0 {
+                learned.bitrate = folder::average_bitrate(file, learned.length_s);
+            }
+            if learned.sample_rate == 0 {
+                learned.sample_rate = src_rate.max(decoded_rate);
+            }
+            if learned.bpm_x100 == 0 {
+                learned.bpm_x100 = grid.map_or(0, |g| (g * 100.0).round() as i64);
+            }
+            if learned.key.is_empty() {
+                learned.key = l.analysis.key.clone().unwrap_or_default();
+            }
+            (learned != *t).then_some(learned)
+        });
+        if let Some(t) = &learned {
+            l.track = Some(t.clone());
+        }
         let (base, rate) = (l.base_bpm, self.rate.get());
         let (cue_views, pad_views) = if added_cues {
             (Some(cuelist::views(&l.analysis)), Some(self.pad_views(&l)))
@@ -451,6 +527,12 @@ impl Deck {
             (None, None)
         };
         drop(l);
+        if let Some(t) = &learned {
+            browser::tags_learned(t);
+            if let Some(app) = self.app.upgrade() {
+                trackinfo::tags_learned(&app, t);
+            }
+        }
         self.show(|v| {
             v.loaded = true;
             v.loading = false;

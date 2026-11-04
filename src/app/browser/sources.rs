@@ -4,7 +4,10 @@
 //! opens when its row is chosen; its lists are read-only and join the Collection through IMPORT TO COLLECTION (File and
 //! Track menus, the strip button). Devices are polled once a second: plugging one in or out updates the tree, and a device
 //! with a library is read as soon as it appears. Every source is read on a worker thread (a USB stick or a big Explorer tree
-//! takes seconds), with its steps in the status bar's loading line ([`loading`]) and a toast when done.
+//! takes seconds), with its steps in the status bar's loading line ([`loading`]) and a toast when done. A plain folder kind
+//! (Explorer, a device's top folder, a pinned or a system folder) is listed one level at a time, from its tag cache
+//! ([`Folder::open_level`]): its files and its immediate subfolders, never the whole tree ([`View::source_level`]).
+//! Walking a tree is an explicit action, not part of opening a folder.
 
 use super::{
     loading,
@@ -19,7 +22,12 @@ use openfader::{
     plugin, store,
 };
 use slint::ComponentHandle;
-use std::{collections::HashMap, path::PathBuf, rc::Rc, time::Instant};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    rc::Rc,
+    time::Instant,
+};
 
 /// Where a source comes from.
 #[derive(Clone, Debug, PartialEq)]
@@ -65,6 +73,9 @@ pub struct Source {
     pub folders: Vec<DeviceFolder>,
     /// The library of each folder of [`Source::folders`], once it was read (the folders keep their own).
     pub folder_libs: Vec<Option<Rc<dyn Library>>>,
+    /// The top-level folder of a device or a volume being read ([`View::open_device_folder`]), by its shown
+    /// path: a click on the same folder row while the read is in flight must not start a second worker.
+    folder_reading: Option<String>,
     /// Being read on a worker thread ([`View::read_source`]).
     reading: bool,
 }
@@ -270,6 +281,7 @@ pub fn collect(old: Vec<Source>, media_explorer: bool) -> Vec<Source> {
                     missing: Vec::new(),
                     folders: Vec::new(),
                     folder_libs: Vec::new(),
+                    folder_reading: None,
                     reading: false,
                 },
             }
@@ -688,17 +700,21 @@ impl View {
         let Some(folder) = self.sources.get(i).and_then(|s| s.folders.get(j)) else {
             return;
         };
-        if self
-            .sources
-            .get(i)
-            .and_then(|s| s.folder_libs.get(j))
-            .is_some_and(Option::is_some)
-        {
-            return;
-        }
         let path = folder.path.clone();
         let name = folder.name.clone();
+        // Read already, or being read ([`Source::folder_reading`]): a click on the same folder row again does
+        // not start a second worker.
+        let shown = path.to_string_lossy().into_owned();
+        if self.sources.get(i).is_some_and(|s| {
+            s.folder_libs.get(j).is_some_and(Option::is_some)
+                || s.folder_reading.as_deref() == Some(shown.as_str())
+        }) {
+            return;
+        }
         loading(app, &format!("{name}: reading…"), Some(0.0));
+        if let Some(s) = self.sources.get_mut(i) {
+            s.folder_reading = Some(shown);
+        }
         read(app, Kind::DeviceFolder { path });
     }
 
@@ -728,18 +744,11 @@ impl View {
         loading(app, "", None);
         // A device's folder: its library goes into the folder it belongs to.
         if let Kind::DeviceFolder { path } = &kind {
+            self.clear_folder_reading(path);
             let text = match read {
                 Ok((lib, playlists, tracks, _)) => {
                     let lib: Rc<dyn Library> = Rc::<dyn Library + Send>::from(lib);
-                    for s in &mut self.sources {
-                        if let Some(at) = s.folders.iter().position(|f| &f.path == path) {
-                            if s.folder_libs.len() <= at {
-                                s.folder_libs.resize(at + 1, None);
-                            }
-                            s.folder_libs[at] = Some(lib.clone());
-                            s.folders[at].playlists = playlists.clone();
-                        }
-                    }
+                    self.store_folder(path, &lib, &playlists);
                     let s_ = |n: usize| if n == 1 { "" } else { "s" };
                     format!(
                         "{}: {tracks} track{} ready ({secs:.1} s)",
@@ -816,8 +825,113 @@ impl View {
         toast::show(app, &text);
         self.say(app, text);
         self.rebuild(app);
-        if matches!(self.entry, Entry::Source(j) | Entry::SourceAll(j) | Entry::SourceList(j, _) if j == i)
-        {
+        if matches!(
+            self.entry,
+            Entry::Source(j) | Entry::Pinned(j) | Entry::SourceAll(j) | Entry::SourceList(j, _)
+                if j == i
+        ) {
+            self.show(app);
+        }
+    }
+
+    /// Puts a top-level folder's read into the source that owns it ([`Source::folder_libs`], found by path over
+    /// the device and the volumes that list it). The level listing of [`Folder::open_level`] fills it, and a
+    /// later listing of the same folder replaces it.
+    fn store_folder(&mut self, path: &Path, lib: &Rc<dyn Library>, playlists: &[Playlist]) {
+        for s in &mut self.sources {
+            if let Some(at) = s.folders.iter().position(|f| f.path.as_path() == path) {
+                if s.folder_libs.len() <= at {
+                    s.folder_libs.resize(at + 1, None);
+                }
+                s.folder_libs[at] = Some(lib.clone());
+                s.folders[at].playlists = playlists.to_vec();
+            }
+        }
+    }
+
+    /// The top-level folder `path` was listed ([`View::source_level`]): its [`Source::folder_reading`] drops.
+    fn clear_folder_reading(&mut self, path: &Path) {
+        let shown = path.to_string_lossy().into_owned();
+        for s in &mut self.sources {
+            if s.folder_reading.as_deref() == Some(shown.as_str()) {
+                s.folder_reading = None;
+            }
+        }
+    }
+
+    /// Plain folder `kind` was listed by level ([`read`], [`Folder::open_level`]): the files and subfolders of
+    /// one directory, from the tag cache alone. It is the final result of opening a folder, so no recursive
+    /// walk follows; walking a whole tree is an explicit action, not part of showing a folder.
+    fn source_level(&mut self, app: &App, kind: Kind, read: Read, secs: f32) {
+        loading(app, "", None);
+        // A device's or volume's top-level folder: its library goes into the folder it belongs to.
+        if let Kind::DeviceFolder { path } = &kind {
+            self.clear_folder_reading(path);
+            let (listed, text) = match read {
+                Ok((lib, playlists, tracks, _)) => {
+                    let lib: Rc<dyn Library> = Rc::<dyn Library + Send>::from(lib);
+                    self.store_folder(path, &lib, &playlists);
+                    let folders = playlists.len();
+                    let s_ = |n: usize| if n == 1 { "" } else { "s" };
+                    (
+                        true,
+                        format!(
+                            "{}: {tracks} track{}, {folders} folder{} in this folder ({secs:.1} s)",
+                            kind.short(),
+                            s_(tracks),
+                            s_(folders),
+                        ),
+                    )
+                }
+                Err(e) => (false, format!("{}: cannot read it: {e}", kind.short())),
+            };
+            eprintln!("{text}");
+            self.say(app, text);
+            self.rebuild(app);
+            // The folder's rows are on screen: list what just arrived.
+            if listed
+                && matches!(
+                    self.entry,
+                    Entry::DeviceFolder(d, j) | Entry::DeviceFolderList(d, j, _)
+                        if self
+                            .sources
+                            .get(d)
+                            .and_then(|s| s.folders.get(j))
+                            .is_some_and(|f| f.path.as_path() == path.as_path())
+                )
+            {
+                self.show(app);
+            }
+            return;
+        }
+        let Some(i) = self.sources.iter().position(|s| s.kind.same(&kind)) else {
+            return; // unplugged or switched off meanwhile
+        };
+        let s = &mut self.sources[i];
+        s.reading = false;
+        let text = match read {
+            Ok((lib, playlists, tracks, missing)) => {
+                let lib: Rc<dyn Library> = Rc::<dyn Library + Send>::from(lib);
+                let folders = playlists.len();
+                (s.lib, s.playlists, s.missing) = (Some(lib), playlists, missing);
+                let s_ = |n: usize| if n == 1 { "" } else { "s" };
+                format!(
+                    "{}: {tracks} track{}, {folders} folder{} in this folder ({secs:.1} s)",
+                    kind.short(),
+                    s_(tracks),
+                    s_(folders),
+                )
+            }
+            Err(e) => format!("{}: cannot read it: {e}", kind.short()),
+        };
+        eprintln!("{text}");
+        self.say(app, text);
+        self.rebuild(app);
+        if matches!(
+            self.entry,
+            Entry::Source(j) | Entry::Pinned(j) | Entry::SourceAll(j) | Entry::SourceList(j, _)
+                if j == i
+        ) {
             self.show(app);
         }
     }
@@ -893,8 +1007,22 @@ impl View {
     }
 }
 
+/// The root of the plain folder kinds (`Explorer`, a device's top folder, a pinned or a system folder): the ones
+/// the worker lists one level at a time, from the tag cache ([`Folder::open_level`]).
+fn plain_folder(kind: &Kind) -> Option<&Path> {
+    match kind {
+        Kind::Explorer(p)
+        | Kind::DeviceFolder { path: p }
+        | Kind::Pinned { path: p, .. }
+        | Kind::SystemFolder { path: p, .. } => Some(p.as_path()),
+        _ => None,
+    }
+}
+
 /// Reads `kind` off the UI thread and hands it to the browser ([`View::source_read`]). A device's library files are read
 /// through once first with byte progress (the slow part on a USB stick); opening them then comes from the page cache.
+/// A plain folder kind ([`plain_folder`]) lists one directory at a time from its tag cache ([`Folder::open_level`])
+/// and hands that level to the browser ([`View::source_level`]): walking the whole tree is not part of opening a folder.
 fn read(app: &App, kind: Kind) {
     let weak = app.as_weak();
     std::thread::spawn(move || {
@@ -908,6 +1036,7 @@ fn read(app: &App, kind: Kind) {
             });
         };
         if let Kind::Device(d) = &kind {
+            let t = Instant::now();
             let mut shown = u64::MAX;
             plug::prefetch(d, |done, total| {
                 let pct = done * 100 / total.max(1);
@@ -920,6 +1049,10 @@ fn read(app: &App, kind: Kind) {
                     );
                 }
             });
+            eprintln!(
+                "sources: {name}: library read through in {} ms",
+                t.elapsed().as_millis()
+            );
         }
         // A volume's top-level folders: the tree lists them, here, and keeps the answer.
         let folders = match &kind {
@@ -927,12 +1060,58 @@ fn read(app: &App, kind: Kind) {
             Kind::LocalDisk { path, .. } => folder_rows(device::top_folders(path)),
             _ => Vec::new(),
         };
+        // A plain folder opens one level at a time, from its tag cache: the files and subfolders of that
+        // directory. That listing is the final result, so the recursive walk below is skipped (walking the
+        // whole tree is an explicit action, never part of opening a folder).
+        if let Some(p) = plain_folder(&kind) {
+            let t = Instant::now();
+            let listed = Folder::open_level(p).and_then(|lib| {
+                let lib: Box<dyn Library + Send> = Box::new(lib);
+                let playlists = lib.playlists()?;
+                let tracks = lib.tracks(None)?;
+                let missing = missing_of(&kind, &tracks);
+                Ok((lib, playlists, tracks.len(), missing))
+            });
+            let secs = start.elapsed().as_secs_f32();
+            match &listed {
+                Ok((_, _, count, _)) => eprintln!(
+                    "sources: {name}: listed {count} in {} ms (level)",
+                    t.elapsed().as_millis()
+                ),
+                Err(e) => eprintln!(
+                    "sources: {name}: listing failed in {} ms: {e}",
+                    t.elapsed().as_millis()
+                ),
+            }
+            let _ = slint::invoke_from_event_loop(move || {
+                if let (Some(app), Some(view)) = (weak.upgrade(), super::view()) {
+                    view.borrow_mut().source_level(&app, kind, listed, secs);
+                }
+            });
+            return;
+        }
         step(format!("{name}: listing tracks and playlists"), 0.85);
-        let read: Read = kind.open().and_then(|lib| {
+        let t_open = Instant::now();
+        let opened = kind.open();
+        if let Err(e) = &opened {
+            eprintln!("sources: {name}: open failed in {} ms: {e}", t_open.elapsed().as_millis());
+        } else {
+            eprintln!("sources: {name}: opened in {} ms", t_open.elapsed().as_millis());
+        }
+        let read: Read = opened.and_then(|lib| {
+            let t_lists = Instant::now();
             let playlists = lib.playlists()?;
+            let lists_ms = t_lists.elapsed().as_millis();
+            let t_tracks = Instant::now();
             let tracks = lib.tracks(None)?;
             let count = tracks.len();
+            let tracks_ms = t_tracks.elapsed().as_millis();
+            let t_missing = Instant::now();
             let missing = missing_of(&kind, &tracks);
+            eprintln!(
+                "sources: {name}: playlists {lists_ms} ms, {count} tracks {tracks_ms} ms, missing-of-collection {} ms",
+                t_missing.elapsed().as_millis()
+            );
             Ok((lib, playlists, count, missing))
         });
         let secs = start.elapsed().as_secs_f32();

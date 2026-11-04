@@ -32,7 +32,18 @@ MyOpenFadeR es un fork de [OpenFadeR](https://github.com/OpenRsG/OpenFadeR): una
 
 Todas las capturas de esta página salen de la aplicación en marcha, con una biblioteca de pistas sintéticas generadas para estas imágenes. No hay música con derechos en ellas.
 
-## Novedades de la 0.4.2
+## Novedades de la 0.5.0
+
+La 0.5.0 pone el navegador al ritmo de la mezcla:
+
+- **Selección múltiple en la lista.** Ctrl/Cmd+clic alterna una fila, Shift+clic elige un intervalo, y las filas elegidas se resaltan con un contador. *Remove from list* borra todas las entradas seleccionadas en un solo paso de undo y nunca toca archivos del disco.
+- **Las carpetas actúan desde su menú contextual.** Marca una carpeta como favorita, quita el favorito, analiza la carpeta entera en segundo plano o actualízala; las subcarpetas anidadas también se pueden marcar. Al hacer clic en una favorita se abre en vez de desmarcarse.
+- **El análisis de carpeta recuerda su trabajo.** Las pistas ya analizadas con el analizador actual se omiten, y el recorrido corre en un worker.
+- **Versiones del analizador sin reescaneo masivo.** La caché guarda la versión del analizador. Un aviso único al iniciar ofrece *Reanalizar ahora* o *Más tarde*; las pistas antiguas se reanalizan on demand al cargarlas en un deck, nunca todas de golpe.
+- **El grid no cambia bajo un deck en reproducción.** El análisis que llega se aplica solo cuando el deck está parado o en pausa, sin loop ni scratch; si no, espera.
+- **Añadir por lote.** *Add to playlist* y las paletas se aplican ahora a todas las pistas seleccionadas, sin duplicados.
+
+### 0.4.2
 
 La 0.4.2 hace fiable el timing y el SYNC con las manos rápidas y añade los últimos detalles de seguridad y flujo de trabajo:
 
@@ -269,7 +280,6 @@ El comportamiento del audio, del MIDI y de las carpetas se ajusta con `OPENFADER
 - [docs/skins.md](docs/skins.md): ficheros de tema, cada token, pistas de diseño
 - [docs/mappings.md](docs/mappings.md): archivos de mapeo de controlador
 - [docs/library-format.md](docs/library-format.md): la exportación abierta en JSON / CSV y las tablas de la base de datos
-- [hallazgos_solucionados.md](hallazgos_solucionados.md): lo que se encontró y lo que se reparó, con el commit de cada arreglo
 
 El código sigue [docs/code-structure.md](docs/code-structure.md): una carpeta por sección (`library/`, `analysis/`, `audio/`, `plugin/`, `app/`, …), un `mod.rs` base y una hija por variante. Solo `app/` y la crate `ui/` usan Slint.
 

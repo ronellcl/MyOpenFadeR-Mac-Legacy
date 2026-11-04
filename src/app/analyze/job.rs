@@ -11,7 +11,7 @@ use openfader::{
         options::Options,
         tag, Analysis, Beat, Phrases,
     },
-    library::Track,
+    library::{Track, folder},
     store::Store,
 };
 use std::{
@@ -42,6 +42,9 @@ pub struct Job {
     pub explicit: bool,
     /// The library gave the track a key.
     pub library_key: bool,
+    /// Analyze Track discards the grid saved in the store (it may come from another library or an old analysis);
+    /// imports and the automatic run keep their edits.
+    pub replace_grid: bool,
     pub guide: Guide,
 }
 
@@ -59,10 +62,36 @@ pub struct Settings {
     pub low_priority: bool,
 }
 
+/// The file tags the analysis can fill in without a second pass: duration, average bitrate and sample rate from the
+/// file, BPM and key from the analysis. Only the fields the library lacked change.
+fn learned_tags(job: &Job, a: &Analysis) -> Option<Track> {
+    let mut t = job.track.clone();
+    let file = t.file.as_deref()?;
+    let probe = folder::read_track(file);
+    if t.length_s == 0 {
+        t.length_s = probe.length_s;
+    }
+    if t.bitrate == 0 {
+        t.bitrate = probe.bitrate;
+    }
+    if t.sample_rate == 0 {
+        t.sample_rate = probe.sample_rate;
+    }
+    let (bpm, key) = summary(a);
+    if t.bpm_x100 == 0 {
+        t.bpm_x100 = bpm;
+    }
+    if t.key.is_empty() {
+        t.key = key;
+    }
+    (t != job.track).then_some(t)
+}
+
 /// The cues and tag of one analysed track (`a`), the part of [`spawn`]'s work that is not decoding.
 fn finish(job: &Job, a: &Analysis, src: Source, s: &Settings, store: &Store) -> Outcome {
     let g = &job.guide;
-    let (beats, phrases) = if g.beats.is_empty() {
+    // Analyze Track takes the grid from the new analysis even when the library still has an edited one.
+    let (beats, phrases) = if job.replace_grid || g.beats.is_empty() {
         (a.beats.as_slice(), a.phrases.clone())
     } else {
         let own = || {
@@ -95,8 +124,19 @@ fn finish(job: &Job, a: &Analysis, src: Source, s: &Settings, store: &Store) -> 
         .filter(|_| job.explicit || !job.library_key)
         .zip(a.key.as_deref())
         .map(|(text, key)| tag::write_key(&job.path, &text(key)));
+    // The new analysis is already in the cache. Dropping the stored grid makes the next read use it; a failure here
+    // keeps the old grid rather than losing it.
+    if job.replace_grid {
+        if let Err(e) = store.system(|| store.reset_grid(&job.key)) {
+            eprintln!(
+                "analyze: {}: grid not reset: {e}",
+                job.path.display()
+            );
+        }
+    }
     Outcome {
         found: summary(a),
+        learned: learned_tags(job, a),
         src,
         cues,
         tag,
@@ -219,6 +259,7 @@ mod tests {
             key: format!("{path}|1"),
             explicit: false,
             library_key: false,
+            replace_grid: false,
             guide,
         }
     }
@@ -476,5 +517,29 @@ mod tests {
         assert_eq!(got.len(), 6);
         got.dedup();
         assert_eq!(got.len(), 6, "each job exactly once");
+    }
+
+    #[test]
+    fn analyze_track_drops_the_saved_grid_only_when_asked() {
+        let original = beats();
+        let store = Store::in_memory().unwrap();
+        let mut j = job("replace-grid", Guide { beats: original.clone(), ..Default::default() });
+        store.set_grid(&j.key, &original[..1], &original[..2]).unwrap();
+        j.replace_grid = true;
+        finish(&j, &analysed(), src(), &settings(false), &store);
+        assert!(
+            store.edits(&j.key).unwrap().grid.is_none(),
+            "ANALYZE TRACK takes the new grid"
+        );
+
+        let store = Store::in_memory().unwrap();
+        let j = job("keep-grid", Guide { beats: original.clone(), ..Default::default() });
+        store.set_grid(&j.key, &original[..1], &original[..2]).unwrap();
+        finish(&j, &analysed(), src(), &settings(false), &store);
+        assert_eq!(
+            store.edits(&j.key).unwrap().grid.unwrap().len(),
+            1,
+            "imports and automatic runs keep the edited grid"
+        );
     }
 }
