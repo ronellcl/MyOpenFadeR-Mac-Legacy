@@ -42,6 +42,15 @@ Funciona con CPU. La primera vez descarga el modelo (316 MB) a `~/Library/Caches
 
 El plugin se descarga su propio `yt-dlp` en `~/Library/Application Support/openfader/plugins/yt-dlp/bin`, que es una carpeta escribible: así puede auto-actualizarse sin tocar la app, que es de solo lectura y se reemplaza en cada actualización. La app comprueba y repara sola los permisos de ejecución de sus herramientas y de esos binarios al arrancar y antes de lanzar un plugin, así que no hay que ejecutar `chmod` a mano.
 
+### Mapas MIDI: exportar e importar
+
+En el panel **MIDI** (el chip `MIDI`, junto a `DEVICE` y `PREFS`) hay dos botones, debajo de la línea del controlador conectado:
+
+- **EXPORT MAPPING** guarda en un único `.xml` el mapa que está usando el controlador, con los cambios que hayas hecho con MIDI LEARN ya incluidos (tu fila gana para el mismo control). Eliges dónde guardarlo y la carpeta se abre al terminar.
+- **IMPORT MAPPING** lee un archivo exportado así (o cualquiera del formato de MyOpenFadeR), lo valida antes de tocar nada y lo instala en `~/Library/Application Support/openfader/mappings/` con el nombre del mapa en uso, de modo que lo reemplaza y el controlador se recarga solo. El resultado aparece en el mismo panel.
+
+Sirve para llevar tu mapa y tus bindings a otro Mac, o para recuperarlos después de reinstalar.
+
 ### Avisos
 
 - **Comparte la carpeta de datos** (`~/Library/Application Support/openfader`) con el MyOpenFadeR principal. Si abres este build y luego vuelves al principal, la base de datos puede quedar actualizada a un esquema más nuevo y este build la rechazará. Para volver atrás, borra o restaura `store.db`. Detalles en `LEGACY.md`.
