@@ -157,24 +157,22 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           pattern: package-macos-catalina
           path: out
           merge-multiple: true
+      - name: The notes, with the checksum of this archive
+        # docs/release-notes-es.md is the body; the digest is the one of the file uploaded now, so it is never stale.
+        run: |
+          sum=$(sha256sum out/*.zip | cut -d' ' -f1)
+          { cat docs/release-notes-es.md
+            printf '\n### Verificación\n\n```\nSHA256  %s\n```\n\n`shasum -a 256 -c` con el nombre del zip y ese valor confirma la descarga.\n' "$sum"
+          } > body.md
       - uses: softprops/action-gh-release@v2
         with:
           draft: true
           files: out/*.zip
           generate_release_notes: true
-          body: |
-            **Legacy build for macOS 10.15 Catalina, Intel (x86_64).** Not for Apple silicon, not for 10.13 or 10.14.
-
-            `MyOpenFadeR-<version>-macos-catalina-x86_64.zip` holds `MyOpenFadeR.app` with its themes, controller mappings,
-            plugins, static `ffmpeg`/`ffprobe` and ONNX Runtime 1.16.3 (STEMS works). It is **not signed or notarized**: move
-            it to Applications, then right-click > Open (once) and confirm. If macOS says it is damaged, run
-            `xattr -dr com.apple.quarantine /Applications/MyOpenFadeR.app`.
-
-            This build shares `~/Library/Application Support/openfader` with the main app: read the schema warning in
-            `LEGACY.md` before going back to a newer version. STEMS needs about 2.7 GB of RAM at the default settings
-            (`OPENFADER_STEMS_OPT=0` halves that, slower).
+          body_path: body.md

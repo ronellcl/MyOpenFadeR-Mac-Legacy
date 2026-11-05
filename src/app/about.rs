@@ -12,7 +12,7 @@ const RELEASES: &str =
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The legacy build number of this tree: tagged `v<version>-catalina.<n>`, so `n` counts the rebuilds of one upstream version
 /// (the main repository does one release per version). Bump it with the tag; the release workflow refuses a tag that differs.
-const BUILD: u64 = 1;
+const BUILD: u64 = 2;
 
 /// This build, as the releases are tagged: `0.4.2-catalina.1`.
 fn have() -> String {
