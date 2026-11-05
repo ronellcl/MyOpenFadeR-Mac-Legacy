@@ -4,7 +4,7 @@ use super::jog::Jog;
 use super::led::Leds;
 use super::Ev;
 use super::{
-    decode, hotplug, layer, learn, lights, pickup::Pickup, prefs_audio, usermap, Guard, Midi,
+    decode, export, hotplug, layer, learn, lights, pickup::Pickup, prefs_audio, usermap, Guard, Midi,
 };
 use crate::app::deck::{Decks, DECKS};
 use crate::app::{App, MidiState};
@@ -74,6 +74,19 @@ pub fn wire(app: &App, decks: Decks) -> Guard {
     super::get::register(&midi);
     let m = midi.clone();
     state.on_assign(move |act, deck| m.assign(act as usize, deck));
+    // EXPORT MAPPING / IMPORT MAPPING: the file chooser blocks, so it runs on this (UI) thread like the library's Browse.
+    let (weak, m) = (app.as_weak(), midi.clone());
+    state.on_export_map(move || {
+        if let Some(app) = weak.upgrade() {
+            export::export(&app, &m);
+        }
+    });
+    let (weak, m) = (app.as_weak(), midi.clone());
+    state.on_import_map(move || {
+        if let Some(app) = weak.upgrade() {
+            export::import(&app, &m);
+        }
+    });
     lights::quit_on_signals();
 
     // The first connection is the same as every later one; then the port list is watched.

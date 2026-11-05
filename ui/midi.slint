@@ -21,8 +21,14 @@ export global MidiState {
     in-out property <string> connected;
     in-out property <string> link;
     in property <[string]> actions;
+    /// Result of the last EXPORT MAPPING / IMPORT MAPPING ("" = none yet).
+    in-out property <string> map-note;
     /// (action index, deck 0 = A / 1 = B)
     callback assign(int, int);
+    /// Writes the mapping in use (MIDI LEARN changes included) to a file.
+    callback export-map();
+    /// Reads a mapping file into the mapping folder and loads it.
+    callback import-map();
 }
 
 /// Small button that opens the learn overlay.
@@ -31,7 +37,7 @@ export component MidiChip inherits Chip {
     width: 44px;
     height: 18px;
     active: MidiState.mapped > 0;
-    clicked => { MidiState.captured = ""; MidiState.visible = true; }
+    clicked => { MidiState.captured = ""; MidiState.map-note = ""; MidiState.visible = true; }
 }
 
 export component MidiOverlay inherits Rectangle {
@@ -57,6 +63,14 @@ export component MidiOverlay inherits Rectangle {
             Text { text: MidiState.controller; color: Theme.overlay-ok; font-size: Theme.font-size; wrap: word-wrap; }
             if MidiState.status != "": Text { text: MidiState.status; color: Theme.overlay-warn; font-size: Theme.font-size; wrap: word-wrap; }
             Text { text: MidiState.connected == "" ? "No controller connected" : MidiState.connected + " · " + MidiState.link; color: MidiState.connected == "" ? Theme.overlay-dim : Theme.overlay-ok; font-size: Theme.font-size; font-weight: Theme.weight-bold; wrap: word-wrap; }
+            HorizontalLayout {
+                height: 24px;
+                spacing: 6px;
+                Chip { text: "EXPORT MAPPING"; width: 130px; height: 22px; horizontal-stretch: 0; clicked => { MidiState.export-map(); } }
+                Chip { text: "IMPORT MAPPING"; width: 130px; height: 22px; horizontal-stretch: 0; clicked => { MidiState.import-map(); } }
+                Rectangle {}
+            }
+            if MidiState.map-note != "": Text { text: MidiState.map-note; color: Theme.overlay-bound; font-size: Theme.font-size; wrap: word-wrap; }
             Text {
                 text: MidiState.captured == "" ? "Move a control on your controller…" : "Captured " + MidiState.captured + " — pick an action (A / B = deck):";
                 color: Theme.overlay-text;

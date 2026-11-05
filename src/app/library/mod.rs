@@ -16,7 +16,7 @@
 //! the result back to the UI thread.
 
 mod backup;
-mod dialog;
+pub(crate) mod dialog;
 pub mod dupes;
 mod export;
 mod import;

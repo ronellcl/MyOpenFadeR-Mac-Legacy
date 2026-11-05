@@ -32,7 +32,6 @@ use super::{Binding, Led, LedRow, Msg, actions::ACTIONS};
 use openfader::library::markup::{Edge, tags};
 use openfader::paths::search_path;
 use std::collections::HashMap;
-#[cfg(test)]
 use std::fmt::Write as _;
 
 /// What a mapping file holds.
@@ -53,9 +52,9 @@ pub(super) struct Mapping {
     pub bad: Vec<String>,
 }
 
-/// The file text of `m`; the round trip of every built-in file is tested.
-#[cfg(test)]
-fn write(m: &Mapping, port: &str) -> String {
+/// The file text of `m`; the round trip of every built-in file is tested. [`super::export`] writes the mapping in use with
+/// it, so it is not test-only any more.
+pub(super) fn write(m: &Mapping, port: &str) -> String {
     let mut s = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<OpenFadeRMapping schemaVersion=\"1\">\n  <info>\n",
     );
@@ -105,7 +104,6 @@ fn write(m: &Mapping, port: &str) -> String {
     s
 }
 
-#[cfg(test)]
 fn esc(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -338,7 +336,9 @@ pub(super) fn load(ports: &[String]) -> Pick {
 }
 
 fn pick(ports: &[String], files: Vec<(String, String)>) -> Pick {
-    let mut best: Option<(usize, Mapping)> = None;
+    // (match length, mapping, the file name and its `<port>`: what an export writes under, and what an import has to
+    // replace to take effect).
+    let mut best: Option<(usize, Mapping, String, String)> = None;
     let mut errors = Vec::new();
     for (name, text) in files {
         match parse(&text) {
@@ -347,23 +347,38 @@ fn pick(ports: &[String], files: Vec<(String, String)>) -> Pick {
             Err(e) => errors.push(format!("{name}: {e}")),
             Ok((m, port)) => {
                 if let Some(len) = match_len(ports, &port)
-                    && best.as_ref().is_none_or(|(l, _)| len > *l)
+                    && best.as_ref().is_none_or(|(l, ..)| len > *l)
                 {
-                    best = Some((len, m));
+                    best = Some((len, m, name, port));
                 }
             }
         }
     }
-    Pick {
-        map: best.map(|(_, m)| m),
-        errors,
+    match best {
+        Some((_, map, name, port)) => Pick {
+            map: Some(map),
+            name,
+            port,
+            errors,
+        },
+        None => Pick {
+            map: None,
+            name: String::new(),
+            port: String::new(),
+            errors,
+        },
     }
 }
 
-/// [`pick`]'s answer: the chosen mapping (if a file matched a port) and what the files reported.
+/// [`pick`]'s answer: the chosen mapping (if a file matched a port), the file and `<port>` it came from, and what the files
+/// reported.
 #[derive(Debug)]
 pub(super) struct Pick {
     pub map: Option<Mapping>,
+    /// The name of the file that won ("" without one): the name an imported mapping takes to replace it.
+    pub name: String,
+    /// Its `<port>` ("" without one).
+    pub port: String,
     pub errors: Vec<String>,
 }
 
