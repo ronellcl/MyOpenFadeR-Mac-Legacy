@@ -16,6 +16,13 @@
 
    Si macOS dice que está *dañada*, es lo mismo: ejecuta el comando de arriba y vuelve a abrirla.
 
+### Actualizaciones
+
+A partir de esta versión **no hace falta volver a descargar el zip**: al arrancar, la app consulta el repositorio `MyOpenFadeR-Mac-Legacy` y, si hay una compilación más nueva, abre un aviso con **UPDATE**. Ese botón descarga el archivo, lo verifica con el SHA256 publicado y reemplaza solo `MyOpenFadeR.app`; después se reinicia sola. La carpeta de datos, el modelo de STEMS y todo lo demás no se tocan.
+
+- El archivo lo escribe la propia app, así que no queda en cuarentena: no hay que hacer clic derecho > Abrir tras una actualización.
+- Solo se ofrecen las publicaciones de este repositorio, que son las de Catalina e Intel.
+
 ### Qué incluye
 
 - La app, con **ONNX Runtime 1.16.3** dentro (`Contents/Frameworks`), que es la última versión cuyo binario de macOS Intel funciona en 10.15.
@@ -33,14 +40,11 @@ Funciona con CPU. La primera vez descarga el modelo (316 MB) a `~/Library/Caches
 
 ### yt-dlp (YouTube y SoundCloud)
 
-El plugin se descarga su propio `yt-dlp` en `~/Library/Application Support/openfader/plugins/yt-dlp/bin`, que es una carpeta escribible: así puede auto-actualizarse sin tocar la app, que es de solo lectura y se reemplaza en cada actualización. Si alguna vez ves `PermissionError: [Errno 13]` sobre ese binario, cierra la app y ejecuta:
-
-```sh
-chmod -R +x ~/Library/Application\ Support/openfader/plugins/yt-dlp/bin
-```
+El plugin se descarga su propio `yt-dlp` en `~/Library/Application Support/openfader/plugins/yt-dlp/bin`, que es una carpeta escribible: así puede auto-actualizarse sin tocar la app, que es de solo lectura y se reemplaza en cada actualización. La app comprueba y repara sola los permisos de ejecución de sus herramientas y de esos binarios al arrancar y antes de lanzar un plugin, así que no hay que ejecutar `chmod` a mano.
 
 ### Avisos
 
 - **Comparte la carpeta de datos** (`~/Library/Application Support/openfader`) con el MyOpenFadeR principal. Si abres este build y luego vuelves al principal, la base de datos puede quedar actualizada a un esquema más nuevo y este build la rechazará. Para volver atrás, borra o restaura `store.db`. Detalles en `LEGACY.md`.
 - En el log pueden aparecer avisos de temas (`unknown token "studio-*"`, `unknown key "locales"`): son de los temas del repositorio actual, que pueden usar campos más nuevos que esta compilación. El tema carga igual.
-- Puede decir que la actualización automática de la app no está disponible: este build se publica aparte del principal (repositorio `MyOpenFadeR-Mac-Legacy`).
+- Si una salida de audio no arranca (por ejemplo una controladora o un HDMI sin pantalla conectado), la app lo reintenta y, si sigue fallando, sigue con la salida del sistema en vez de quedarse colgada. El motivo aparece en el log.
+- Esta compilación se publica aparte del MyOpenFadeR principal, en el repositorio `MyOpenFadeR-Mac-Legacy`: las actualizaciones que ofrece son siempre las de Catalina e Intel.

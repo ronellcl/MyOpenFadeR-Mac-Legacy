@@ -278,6 +278,13 @@ fn api(lua: &Lua, plugin: &Plugin) -> mlua::Result<()> {
     rk.set(
         "run",
         lua.create_function(move |_, (program, args): (String, Option<Vec<String>>)| {
+            // A program in the plugin's own folder (a downloaded `bin/yt-dlp` and the like) has to be executable.
+            let at = if Path::new(&program).is_absolute() {
+                PathBuf::from(&program)
+            } else {
+                d.join(&program)
+            };
+            crate::exec::make_executable(&at);
             let mut cmd = std::process::Command::new(&program);
             cmd.args(args.unwrap_or_default())
                 .current_dir(&d)

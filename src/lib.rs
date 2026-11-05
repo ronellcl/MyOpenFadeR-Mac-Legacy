@@ -4,6 +4,7 @@ pub mod audio;
 pub mod catalog;
 pub mod device;
 pub mod edit;
+pub mod exec;
 pub mod library;
 pub mod lighting;
 pub mod memory;

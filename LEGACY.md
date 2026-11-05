@@ -19,7 +19,7 @@ a fork of it, so this repository was created by pushing the full history of `ron
 | Graph optimizations | extended, folding off via a 1.17+ session option | **none**: 1.16.3 folds 2.2 GB of constants for no gain (see STEMS below) |
 | Deployment target | 11.0 | **10.15** (`.cargo/config.toml`, `Info.plist`) |
 | Architectures | Linux, Windows, macOS arm64 | **macOS x86_64 only** |
-| Update check | `ronellcl/MyOpenFadeR` | `ronellcl/MyOpenFadeR-Mac-Legacy`, with `-catalina.N` build numbers |
+| Update check | `ronellcl/MyOpenFadeR` | `ronellcl/MyOpenFadeR-Mac-Legacy`, with `-catalina.N` build numbers and an in-place **UPDATE** |
 | Data folder | `~/Library/Application Support/openfader` | the same one (see the schema warning below) |
 
 `LEGACY.md` (this file) is the list of patches. Everything else is upstream's code.
@@ -143,7 +143,10 @@ The patch list, in the order they matter:
 3. `src/stems/model.rs` — `Model::open`/`run` on that layer, `init_ort`, `optimization_level`, no GPU session or folding.
 4. `src/main.rs`, `examples/stems_bench.rs` — `init_ort()` before anything uses ONNX Runtime.
 5. `src/stems/mod.rs` — `pub mod ort;`.
-6. `src/app/about.rs` — legacy update repository, `-catalina.N` ordering.
-7. `.cargo/config.toml`, `rust-toolchain.toml`, `Info.plist` (in the workflow), `.github/workflows/`,
+6. `src/app/about.rs` — legacy update repository, `-catalina.N` ordering, the UPDATE button.
+7. `src/app/update.rs` — new: the in-place updater (download, SHA256 from the API, unpack beside the bundle, swap).
+8. `src/exec.rs` — new: execute bits repaired at launch and before every plugin program (no `chmod` for the user);
+   `src/main.rs`, `src/plugin/mod.rs`, `src/plugin/lua.rs` call it.
+9. `.cargo/config.toml`, `rust-toolchain.toml`, `Info.plist` (in the workflow), `.github/workflows/`,
    `.github/check-minos.sh`, `examples/seg_bench.rs`.
-8. `README.md`, `README.es.md` — the notice at the top; `src/stems/mod.rs` — the module list.
+10. `README.md`, `README.es.md` — the notice at the top; `src/stems/mod.rs` — the module list.

@@ -556,10 +556,10 @@ impl Plugin {
             .split_first()
             .ok_or_else(|| format!("{name}: no command"))?;
         let exe = self.resolve(program);
-        #[cfg(unix)]
-        if Path::new(&exe).starts_with(&self.dir) {
-            ensure_executable(Path::new(&exe));
-        }
+        // A program the plugin downloaded into its own `bin` (yt-dlp and the like) may have lost its execute bits: the
+        // plugin runs it itself, so the fix has to happen before the plugin starts (see `crate::exec`).
+        crate::exec::make_tree_executable(&self.dir.join("bin"), 2);
+        crate::exec::make_executable(Path::new(&exe));
         let mut cmd = Command::new(&exe);
         cmd.args(args.iter().map(|a| self.resolve(a)))
             .current_dir(&self.dir)
@@ -637,16 +637,6 @@ impl Plugin {
 /// copies made before [`crate::zip::Zip::unpack`] kept it are out there. Only paths inside the plugin folder are
 /// touched; Windows has no such bit.
 #[cfg(unix)]
-fn ensure_executable(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    if let Ok(meta) = path.metadata() {
-        let mode = meta.permissions().mode();
-        if mode & 0o111 == 0 {
-            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode | 0o111));
-        }
-    }
-}
-
 /// The Python interpreter for `*.py` scripts.
 ///
 /// The one that travels with the program (`python\` next to it, the folder the installer ships) comes first: the

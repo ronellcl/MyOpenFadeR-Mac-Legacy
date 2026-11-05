@@ -98,6 +98,7 @@ mod stems_model;
 mod track_edit;
 mod toast;
 mod trackinfo;
+mod update;
 mod video;
 mod welcome;
 

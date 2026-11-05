@@ -11,6 +11,12 @@ export global AboutState {
     /// A newer release found at launch (src/app/about.rs): its version and page. Empty: none.
     in-out property <string> update;
     in property <string> update-url;
+    /// How the in-place update is going ("Downloading…", an error…); empty while there is nothing to report.
+    in-out property <string> update-status;
+    /// 0 to 1 while the archive downloads.
+    in-out property <float> update-progress: 0;
+    /// Downloads the release, verifies it and replaces the app, then restarts it (src/app/update.rs).
+    callback install();
 }
 
 /// One "label   link" row; the link opens `url`.
@@ -62,11 +68,12 @@ export component AboutOverlay inherits DialogFrame {
     Note { text: "Free software: you may use, share and change it under the AGPL. MyOpenFadeR is a fork of OpenFadeR by OpenRsG, built with Rust and Slint."; wrap: word-wrap; horizontal-alignment: center; }
 }
 
-/// Shown at launch when GitHub has a newer release: DOWNLOAD opens its page, LATER closes until the next launch.
+/// Shown at launch when GitHub has a newer release: UPDATE installs it in place and restarts, LATER closes until the next
+/// launch. The version line opens the release page.
 export component UpdateOverlay inherits DialogFrame {
     visible: AboutState.update != "";
     title: "Update available";
-    card-width: 420px;
+    card-width: 440px;
     closed => { AboutState.update = ""; }
     HorizontalLayout {
         alignment: center;
@@ -75,12 +82,30 @@ export component UpdateOverlay inherits DialogFrame {
     VerticalLayout {
         spacing: Theme.space-xs;
         Text { text: "MyOpenFadeR " + AboutState.update + " is out"; horizontal-alignment: center; color: Theme.text-bright; font-family: Theme.font; font-size: Theme.font-xl; font-weight: Theme.weight-bold; }
-        Text { text: "You have version " + AboutState.version + "."; horizontal-alignment: center; color: Theme.text-dim; font-family: Theme.font; font-size: Theme.font-md; }
+        Text {
+            text: "You have version " + AboutState.version + ". Click here for the release page.";
+            horizontal-alignment: center;
+            color: ta.has-hover ? Theme.text-bright : Theme.text-dim;
+            font-family: Theme.font;
+            font-size: Theme.font-md;
+            wrap: word-wrap;
+            ta := TouchArea { mouse-cursor: pointer; clicked => { AboutState.open(AboutState.update-url); } }
+        }
+        if AboutState.update-status != "": VerticalLayout {
+            spacing: Theme.space-xs;
+            Rectangle {
+                height: 4px;
+                border-radius: 2px;
+                background: Theme.panel-raised;
+                Rectangle { width: parent.width * AboutState.update-progress; height: parent.height; border-radius: 2px; background: Theme.accent; }
+            }
+            Text { text: AboutState.update-status; horizontal-alignment: center; color: Theme.text; font-family: Theme.font; font-size: Theme.font-sm; wrap: word-wrap; }
+        }
     }
     HorizontalLayout {
         alignment: end;
         spacing: Theme.space-sm;
-        Chip { text: "LATER"; width: 80px; horizontal-stretch: 0; clicked => { AboutState.update = ""; } }
-        Chip { text: "DOWNLOAD"; width: 110px; horizontal-stretch: 0; active: true; clicked => { AboutState.open(AboutState.update-url); AboutState.update = ""; } }
+        Chip { text: "LATER"; width: 80px; horizontal-stretch: 0; enabled: AboutState.update-status == ""; clicked => { AboutState.update = ""; } }
+        Chip { text: "UPDATE"; width: 110px; horizontal-stretch: 0; active: true; enabled: AboutState.update-status == ""; clicked => { AboutState.install(); } }
     }
 }

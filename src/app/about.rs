@@ -1,9 +1,11 @@
 //! Help > About ↔ ui/about.slint (`AboutState`): the version, and the project links opened in the browser. At each launch
 //! a background thread asks GitHub for the newest release of this fork (pre-releases included, drafts are not public) and,
-//! when it is newer than this build, `UpdateOverlay` suggests it. Offline or any error: nothing is shown.
+//! when it is newer than this build, `UpdateOverlay` offers it: UPDATE downloads it, checks it against the published SHA256
+//! and replaces the app in place ([`super::update`]). Offline or any error: nothing is shown, or the error in the overlay.
 
-use super::{library, AboutState, App};
+use super::{library, update, AboutState, App};
 use slint::ComponentHandle;
+use std::sync::Mutex;
 use std::time::Duration;
 
 // The legacy repository, never the main one: its releases are arm64 and would be offered as an update this build cannot run.
@@ -12,7 +14,10 @@ const RELEASES: &str =
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The legacy build number of this tree: tagged `v<version>-catalina.<n>`, so `n` counts the rebuilds of one upstream version
 /// (the main repository does one release per version). Bump it with the tag; the release workflow refuses a tag that differs.
-const BUILD: u64 = 2;
+const BUILD: u64 = 3;
+
+/// The release the overlay is offering, kept for its UPDATE button.
+static FOUND: Mutex<Option<update::Release>> = Mutex::new(None);
 
 /// This build, as the releases are tagged: `0.4.2-catalina.1`.
 fn have() -> String {
@@ -25,21 +30,73 @@ pub fn wire(app: &App) {
     s.on_open(|url| {
         let _ = library::open_external(&url);
     });
-    let weak = app.as_weak();
-    std::thread::spawn(move || {
-        if let Some((tag, url)) = latest().filter(|(tag, _)| newer(tag, &have())) {
-            let _ = weak.upgrade_in_event_loop(move |app| {
-                let s = app.global::<AboutState>();
-                s.set_update_url(url.into());
-                s.set_update(tag.trim_start_matches('v').into());
+    s.on_install({
+        let weak = app.as_weak();
+        move || {
+            let Some(release) = FOUND.lock().ok().and_then(|f| f.clone()) else {
+                return;
+            };
+            let Some(app) = weak.upgrade() else {
+                return;
+            };
+            let s = app.global::<AboutState>();
+            if !s.get_update_status().is_empty() {
+                return; // already installing
+            }
+            s.set_update_status("Starting…".into());
+            let weak = app.as_weak();
+            std::thread::spawn(move || {
+                let progress = {
+                    let weak = weak.clone();
+                    move |done: f32| {
+                        let _ = weak.upgrade_in_event_loop(move |app| {
+                            app.global::<AboutState>().set_update_progress(done)
+                        });
+                    }
+                };
+                let say = {
+                    let weak = weak.clone();
+                    move |line: &str| {
+                        let line = line.to_owned();
+                        let _ = weak.upgrade_in_event_loop(move |app| {
+                            app.global::<AboutState>().set_update_status(line.into())
+                        });
+                    }
+                };
+                match update::install(&release, &progress, &say) {
+                    Ok(()) => {
+                        let _ = weak.upgrade_in_event_loop(|app| {
+                            app.global::<AboutState>()
+                                .set_update_status("Restarting…".into());
+                            super::restart();
+                        });
+                    }
+                    Err(e) => {
+                        eprintln!("update: {e}");
+                        let _ = weak.upgrade_in_event_loop(move |app| {
+                            app.global::<AboutState>().set_update_status(e.into())
+                        });
+                    }
+                }
             });
         }
     });
+    let weak = app.as_weak();
+    std::thread::spawn(move || {
+        let Some(release) = latest() else {
+            return;
+        };
+        *FOUND.lock().unwrap() = Some(release.clone());
+        let _ = weak.upgrade_in_event_loop(move |app| {
+            let s = app.global::<AboutState>();
+            s.set_update_url(release.page.clone().into());
+            s.set_update(release.version().into());
+        });
+    });
 }
 
-/// The newest release's tag and page, skipping the repo's non-version releases (a release tagged with a name, like the
-/// model files of the upstream, is not an update).
-fn latest() -> Option<(String, String)> {
+/// The newest release of this repository that is newer than this build and carries an archive for this platform.
+fn latest() -> Option<update::Release> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(15)))
         .build()
@@ -54,13 +111,8 @@ fn latest() -> Option<(String, String)> {
     let v: serde_json::Value = serde_json::from_str(&body).ok()?;
     v.as_array()?
         .iter()
-        .filter_map(|r| {
-            Some((
-                r["tag_name"].as_str()?.to_owned(),
-                r["html_url"].as_str()?.to_owned(),
-            ))
-        })
-        .find(|(tag, _)| is_version(tag))
+        .filter_map(update::release)
+        .find(|r| is_version(&r.tag) && newer(&r.tag, &have()))
 }
 
 /// `tag` looks like `v1.2.3` or `1.2.3` (a `-suffix` is ignored).

@@ -48,6 +48,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // waveforms freeze although audio keeps playing). Set before any Slint call and before threads are spawned.
     unsafe { std::env::set_var("SLINT_NO_MUDA", "1") };
     bundled_tools_first_in_path();
+    // Programs the bundle carries (ffmpeg, ffprobe, python) and binaries older versions of a plugin left at 0644 in its
+    // `bin`: executable again before anything tries to start them, so no user ever needs `chmod` (see `openfader::exec`).
+    openfader::exec::repair_tools();
     openfader::stems::model::init_ort(); // the ONNX Runtime dylib of the bundle, before any thread uses it
     openfader::audio::device::quiet_alsa();
     // A path given (or the old Database setting) is a library to connect; the own music folder always is one.

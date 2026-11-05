@@ -240,7 +240,7 @@ fn a_plugin_program_gets_its_execute_bit_back() {
     let p = d.join("tool");
     fs::write(&p, b"#!/bin/sh\n").unwrap();
     fs::set_permissions(&p, fs::Permissions::from_mode(0o644)).unwrap();
-    ensure_executable(&p);
+    crate::exec::make_executable(&p);
     assert_eq!(fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o755);
     let _ = fs::remove_dir_all(&d);
 }
