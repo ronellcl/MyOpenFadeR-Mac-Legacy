@@ -1,4 +1,4 @@
-**Compilación legacy para macOS 10.15 Catalina (Intel).** Misma aplicación que MyOpenFadeR 0.4.2, con **STEMS funcionando** en Catalina.
+**Compilación legacy para macOS 10.15 Catalina (Intel).** Misma aplicación que MyOpenFadeR 0.5.0, con **STEMS funcionando** en Catalina.
 
 ### Requisitos
 
@@ -42,5 +42,5 @@ chmod -R +x ~/Library/Application\ Support/openfader/plugins/yt-dlp/bin
 ### Avisos
 
 - **Comparte la carpeta de datos** (`~/Library/Application Support/openfader`) con el MyOpenFadeR principal. Si abres este build y luego vuelves al principal, la base de datos puede quedar actualizada a un esquema más nuevo y este build la rechazará. Para volver atrás, borra o restaura `store.db`. Detalles en `LEGACY.md`.
-- En el log pueden aparecer avisos de temas (`unknown token "studio-*"`, `unknown key "locales"`): son de los temas del repositorio actual, que usan campos posteriores a la 0.4.2. El tema carga igual.
+- En el log pueden aparecer avisos de temas (`unknown token "studio-*"`, `unknown key "locales"`): son de los temas del repositorio actual, que pueden usar campos más nuevos que esta compilación. El tema carga igual.
 - Puede decir que la actualización automática de la app no está disponible: este build se publica aparte del principal (repositorio `MyOpenFadeR-Mac-Legacy`).
