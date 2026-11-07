@@ -32,7 +32,36 @@ MyOpenFadeR es un fork de [OpenFadeR](https://github.com/OpenRsG/OpenFadeR): una
 
 Todas las capturas de esta página salen de la aplicación en marcha, con una biblioteca de pistas sintéticas generadas para estas imágenes. No hay música con derechos en ellas.
 
-## Novedades de la 0.5.0
+## Novedades de la 0.5.4
+
+- **Las carpetas se abren un nivel a la vez.** Abrir una carpeta favorita, de un dispositivo o del Explorador ya no recorre todo el árbol ni lee las etiquetas de cada audio, así que un disco externo enorme no puede congelar el navegador. SUBFOLDERS, Analizar carpeta y Preparar Stems siguen recorriendo en workers.
+- **Elige dónde se guardan las descargas.** En Preferencias > Avanzado > Base de datos hay una nueva carpeta DOWNLOADS; vacía mantiene `<carpeta de datos>/plugins`.
+- **Nombres de descarga legibles.** Las descargas nuevas se guardan como `Artista - Título`, con un índice oculto de ids en la carpeta de origen, para encontrar el archivo aunque cambie el título. Las descargas antiguas con nombre por id se siguen reutilizando.
+
+### 0.5.3
+
+- **Medios extraíbles en caché local.** Los vídeos se copian una vez a `~/.cache/openfader/media/` con rename atómico, control de tamaño/fecha y un límite LRU de 20 GB. El deck reproduce la copia local, así que desenchufar el disco ya no congela la imagen; el audio ya sonaba desde memoria.
+- **Preparar Stems por lotes.** Clic derecho en una carpeta favorita o en una playlist de My Playlists para separar sus stems antes de la sesión, con comprobación de espacio, progreso, cancelación y resumen final. Incluye los vídeos al preparar.
+- **Sin saturación de CPU.** Los vídeos ya no inician stems en vivo, el análisis automático se detiene a las 500 pistas pendientes (ANALYZE NOW hace el resto) y la tabla se refresca una sola vez al terminar. Los stems corren con nice 19.
+
+### 0.5.2
+
+La 0.5.2 rediseña el árbol del navegador, con iconos y un orden más claro:
+
+- **Online Music** lista YouTube y Deezer (y sus playlists) desde la biblioteca, cada uno con su propia entrada **Downloads**. SoundCloud se oculta porque su plugin solo descarga avances de 37 segundos.
+- **Library (read-only)** ahora muestra solo las listas que no son de proveedores, y desaparece cuando está vacía; vuelve automáticamente cuando aparece una lista.
+- El árbol empieza por **All tracks**, seguido de Favorites, Tag List, Session history, duplicados, My Playlists (plegable), Cue Banks, History, Tags, Local Music con sus dispositivos y Online Music.
+
+### 0.5.1
+
+La 0.5.1 corrige la reproducción congelada cuando una interfaz de audio no puede ejecutar el formato de canales que anuncia:
+
+- **El audio vuelve a una salida que funciona.** Cuando un controlador o una salida HDMI falla repetidamente (por ejemplo, un DDJ-FLX4 que expone un perfil `analog-surround-40` que PipeWire no puede ejecutar), el motor lo reintenta dos veces y luego pasa al dispositivo por defecto en estéreo. Los decks siguen sonando y el vídeo sigue avanzando en vez de esperar para siempre a un reloj congelado.
+- **Sin salidas HDMI desconectadas.** Si el dispositivo por defecto del sistema es un HDMI/DisplayPort sin pantalla, se ignora y se usa otra salida conectada.
+
+Los paquetes del sistema (`deb` y Arch) siguen usando el `ffmpeg` de la distribución.
+
+### 0.5.0
 
 La 0.5.0 pone el navegador al ritmo de la mezcla:
 

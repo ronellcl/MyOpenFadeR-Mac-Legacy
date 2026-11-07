@@ -19,7 +19,7 @@ use openfader::{
     analysis, audio,
     library::{Library, Track, folder},
     plugin::{event, source},
-    store,
+    store, video,
 };
 use serde_json::json;
 use slint::{ModelRc, VecModel};
@@ -36,13 +36,25 @@ fn decode_and_analyze(t: Track, need: bool) -> Receiver<Result<Decoded, String>>
         let Some(file) = t.file.as_deref() else {
             return;
         };
-        let _ = tx.send(
-            audio::decode_track16_cancellable(file, &|| false).map(|(track, print)| {
-                analysis::cache::remember_fingerprint(&t, &print);
-                let a = need.then(|| analysis::cache::analyze_cached(&t, &track, track.rate).0);
-                (track, a)
-            }),
-        );
+        // A video is read from its local copy when there is one, so unplugging the drive does not stop the decode.
+        let play = if video::is_video(file) {
+            video::local::playable(file)
+        } else {
+            file.to_path_buf()
+        };
+        let copied = play.as_path() != file;
+        if copied {
+            video::local::pin(&play);
+        }
+        let decoded = audio::decode_track16_cancellable(&play, &|| false);
+        if copied {
+            video::local::unpin(&play);
+        }
+        let _ = tx.send(decoded.map(|(track, print)| {
+            analysis::cache::remember_fingerprint(&t, &print);
+            let a = need.then(|| analysis::cache::analyze_cached(&t, &track, track.rate).0);
+            (track, a)
+        }));
     });
     rx
 }
@@ -76,11 +88,12 @@ fn prefetch_next(t: &Track) {
     let Some(next) = NEXT.with(|n| n.borrow().as_ref().and_then(|next| next(t))) else {
         return; // the list does not say (or the browser is not on this thread)
     };
+    let (title, artist) = (next.title.clone(), next.artist.clone());
     let Some(remote) = next.remote.filter(|_| next.file.is_none()) else {
         return; // it is already in the disk
     };
     std::thread::spawn(move || {
-        let _ = source::fetch(&remote);
+        let _ = source::fetch_named(&remote, &title, &artist);
     });
 }
 
@@ -131,9 +144,10 @@ impl Deck {
             l.base_beats = Some(b);
         }
         if let Some(remote) = t.remote.clone().filter(|_| downloading) {
+            let (title, artist) = (t.title.clone(), t.artist.clone());
             let (tx, rx) = channel();
             std::thread::spawn(move || {
-                let _ = tx.send(source::fetch(&remote));
+                let _ = tx.send(source::fetch_named(&remote, &title, &artist));
             });
             *self.download.borrow_mut() = Some(Download {
                 rx,
@@ -457,12 +471,15 @@ impl Deck {
                         l.cue_ms = ms;
                     }
                 }
-                // STEMS start after the player has the audio.
+                // STEMS start after the player has the audio. A video track is skipped: separating its audio
+                // keeps every core busy for minutes and starves the picture and the UI while two videos mix.
                 stem_src = l
                     .track
                     .as_ref()
                     .and_then(|t| t.file.clone())
-                    .filter(|_| prefs::with(|p| p.stems));
+                    .filter(|f| {
+                        prefs::with(|p| p.stems) && !openfader::video::is_video(f)
+                    });
                 if let Some(player) = &self.player {
                     let mut player = player.borrow_mut();
                     src_rate = decoded_rate;
