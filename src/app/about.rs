@@ -14,7 +14,7 @@ const RELEASES: &str =
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The legacy build number of this tree: tagged `v<version>-catalina.<n>`, so `n` counts the rebuilds of one upstream version
 /// (the main repository does one release per version). Bump it with the tag; the release workflow refuses a tag that differs.
-const BUILD: u64 = 4;
+const BUILD: u64 = 1;
 
 /// The release the overlay is offering, kept for its UPDATE button.
 static FOUND: Mutex<Option<update::Release>> = Mutex::new(None);
